@@ -120,10 +120,24 @@ ask() {
   fi
 
   if [[ -n "$default" ]]; then
-    read -r -p "$prompt [$default]: " value
+    if [[ -t 0 ]]; then
+      read -r -p "$prompt [$default]: " value
+    elif [[ -r /dev/tty ]]; then
+      read -r -p "$prompt [$default]: " value </dev/tty
+    else
+      log_e "No interactive TTY available. Set NON_INTERACTIVE=true and pass env vars."
+      exit 1
+    fi
     value="${value:-$default}"
   else
-    read -r -p "$prompt: " value
+    if [[ -t 0 ]]; then
+      read -r -p "$prompt: " value
+    elif [[ -r /dev/tty ]]; then
+      read -r -p "$prompt: " value </dev/tty
+    else
+      log_e "No interactive TTY available. Set NON_INTERACTIVE=true and pass env vars."
+      exit 1
+    fi
   fi
   printf -v "$var_name" '%s' "$value"
 }
@@ -141,7 +155,14 @@ ask_secret() {
     log_e "Required secret variable is missing in NON_INTERACTIVE mode: $var_name"
     exit 1
   fi
-  read -r -s -p "$prompt: " value
+  if [[ -t 0 ]]; then
+    read -r -s -p "$prompt: " value
+  elif [[ -r /dev/tty ]]; then
+    read -r -s -p "$prompt: " value </dev/tty
+  else
+    log_e "No interactive TTY available. Set NON_INTERACTIVE=true and pass env vars."
+    exit 1
+  fi
   echo
   printf -v "$var_name" '%s' "$value"
 }
