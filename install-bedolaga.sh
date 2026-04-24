@@ -58,23 +58,24 @@ SUDO=""
 
 header() {
   echo -e "${BLUE}====================================================${NC}"
-  echo -e "${BLUE} Bedolaga Installer v${SCRIPT_VERSION}${NC}"
+  echo -e "${BLUE}      Установщик Bedolaga v${SCRIPT_VERSION}${NC}"
+  echo -e "${BLUE}      (Bot + Cabinet для Remnawave)${NC}"
   echo -e "${BLUE}====================================================${NC}"
 }
-log_i() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_i() { echo -e "${BLUE}[ИНФО]${NC} $*"; }
 log_ok() { echo -e "${GREEN}[OK]${NC} $*"; }
-log_w() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-log_e() { echo -e "${RED}[ERROR]${NC} $*"; }
+log_w() { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $*"; }
+log_e() { echo -e "${RED}[ОШИБКА]${NC} $*"; }
 
 on_error() {
   local line="$1"
-  log_e "Installer failed at line ${line}."
+  log_e "Ошибка в установщике на строке ${line}."
 }
 trap 'on_error $LINENO' ERR
 
 require_linux() {
   [[ "$(uname -s)" == "Linux" ]] || {
-    log_e "This installer supports Linux only."
+    log_e "Этот установщик поддерживает только Linux."
     exit 1
   }
 }
@@ -85,14 +86,14 @@ setup_sudo() {
   elif command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
   else
-    log_e "Run as root or install sudo."
+    log_e "Запустите от имени root или установите sudo."
     exit 1
   fi
 }
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
-    log_e "Missing required command: $1"
+    log_e "Отсутствует необходимая команда: $1"
     exit 1
   }
 }
@@ -104,19 +105,19 @@ is_true() {
 show_menu() {
   local choice=""
   echo
-  echo "Select action:"
-  echo "  1) Install/Update Bot + Cabinet (recommended)"
-  echo "  2) Install/Update Bot only"
-  echo "  3) Install/Update Cabinet only"
-  echo "  4) Configure Nginx/SSL only (for existing cabinet static files)"
-  echo "  5) Remove Bot only"
-  echo "  6) Remove Cabinet only"
-  echo "  7) Remove Bot + Cabinet"
-  echo "  8) Exit"
+  echo "Выберите действие:"
+  echo "  1) Установить/Обновить Бот + Кабинет (рекомендуется)"
+  echo "  2) Установить/Обновить только Бот"
+  echo "  3) Установить/Обновить только Кабинет"
+  echo "  4) Только настройка Nginx/SSL (для готовых файлов)"
+  echo "  5) Удалить только Бот"
+  echo "  6) Удалить только Кабинет"
+  echo "  7) Полное удаление (Бот + Кабинет)"
+  echo "  8) Выход"
   if [[ -t 0 ]]; then
-    read -r -p "Enter choice [1-8]: " choice
+    read -r -p "Введите выбор [1-8]: " choice
   else
-    read -r -p "Enter choice [1-8]: " choice </dev/tty
+    read -r -p "Введите выбор [1-8]: " choice </dev/tty
   fi
   case "$choice" in
     1) INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
@@ -126,8 +127,8 @@ show_menu() {
     5) ACTION="remove_bot" ;;
     6) ACTION="remove_cabinet" ;;
     7) ACTION="remove_all" ;;
-    8) log_i "Exit by user choice."; exit 0 ;;
-    *) log_w "Invalid choice, using default: option 1."; INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
+    8) log_i "Выход."; exit 0 ;;
+    *) log_w "Неверный выбор, используем вариант 1."; INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
   esac
 }
 
@@ -201,7 +202,7 @@ ask_secret() {
 validate_bot_token() {
   local token="$1"
   if [[ ! "$token" =~ ^[0-9]{8,12}:[a-zA-Z0-9_-]{35}$ ]]; then
-    log_w "Warning: BOT_TOKEN format looks unusual. Should be like 12345678:ABCDEF..."
+    log_w "Внимание: Формат BOT_TOKEN выглядит необычно. Должно быть что-то вроде 12345678:ABCDEF..."
     return 1
   fi
   return 0
@@ -210,7 +211,7 @@ validate_bot_token() {
 validate_admin_ids() {
   local ids="$1"
   if [[ ! "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-    log_e "Error: ADMIN_IDS must be comma-separated numbers (e.g. 12345678,98765432)"
+    log_e "Ошибка: ADMIN_IDS должны быть числами через запятую (например: 12345678,98765432)"
     return 1
   fi
   return 0
@@ -219,7 +220,7 @@ validate_admin_ids() {
 validate_url() {
   local url="$1"
   if [[ ! "$url" =~ ^https?:// ]]; then
-    log_e "Error: URL must start with http:// or https://"
+    log_e "Ошибка: URL должен начинаться с http:// или https://"
     return 1
   fi
   return 0
@@ -260,38 +261,38 @@ apt_install() {
 }
 
 ensure_packages() {
-  log_i "Installing system dependencies..."
+  log_i "Установка системных зависимостей..."
   apt_update
   apt_install \
     ca-certificates curl wget git jq openssl nginx certbot python3-certbot-nginx ufw
-  log_ok "Dependencies installed."
+  log_ok "Зависимости установлены."
 }
 
 ensure_swap() {
   local ram_kb
   ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
   if [[ "$ram_kb" -lt 1900000 ]]; then
-    log_w "Detected low RAM ($((ram_kb / 1024)) MB)."
+    log_w "Обнаружено мало ОЗУ ($((ram_kb / 1024)) MB)."
     if [[ -f /swapfile ]]; then
-      log_i "Swap already exists."
+      log_i "Swap-файл уже существует."
       return 0
     fi
     
     if is_true "$NON_INTERACTIVE"; then
-      log_i "Creating 2GB swap file automatically..."
+      log_i "Автоматическое создание 2GB swap..."
     else
       local answer=""
-      read -r -p "Create 2GB swap file to prevent build failures? (y/n): " answer </dev/tty
+      read -r -p "Создать 2GB swap-файл для стабильной сборки? (y/n): " answer </dev/tty
       [[ "$answer" =~ ^(y|Y|yes|YES)$ ]] || return 0
     fi
     
-    log_i "Creating swap..."
+    log_i "Создание swap..."
     $SUDO fallocate -l 2G /swapfile
     $SUDO chmod 600 /swapfile
     $SUDO mkswap /swapfile
     $SUDO swapon /swapfile
     echo '/swapfile none swap sw 0 0' | $SUDO tee -a /etc/fstab
-    log_ok "Swap file created."
+    log_ok "Swap-файл создан."
   fi
 }
 
@@ -301,21 +302,21 @@ setup_firewall() {
   if is_true "$NON_INTERACTIVE"; then return 0; fi
 
   local answer=""
-  echo -e "\n${BLUE}--- Security ---${NC}"
-  read -r -p "Configure UFW firewall? (allows SSH, 80, 443) (y/n): " answer </dev/tty
+  echo -e "\n${BLUE}--- Безопасность ---${NC}"
+  read -r -p "Настроить фаервол UFW? (разрешит SSH, 80, 443) (y/n): " answer </dev/tty
   if [[ "$answer" =~ ^(y|Y|yes|YES)$ ]]; then
-    log_i "Configuring firewall..."
+    log_i "Настройка фаервола..."
     $SUDO ufw allow 22/tcp
     $SUDO ufw allow 80/tcp
     $SUDO ufw allow 443/tcp
     $SUDO ufw --force enable
-    log_ok "Firewall enabled."
+    log_ok "Фаервол включен."
   fi
 }
 
 ensure_docker() {
   if ! command -v docker >/dev/null 2>&1; then
-    log_i "Installing Docker..."
+    log_i "Установка Docker..."
     curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
     sh /tmp/get-docker.sh
     rm -f /tmp/get-docker.sh
@@ -324,13 +325,13 @@ ensure_docker() {
     apt_install docker-compose-plugin || true
   fi
   docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1 || {
-    log_e "docker compose is unavailable."
+    log_e "docker compose недоступен."
     exit 1
   }
   if [[ -n "$SUDO" ]]; then
     $SUDO usermod -aG docker "$USER" 2>/dev/null || true
   fi
-  log_ok "Docker is ready."
+  log_ok "Docker готов."
 }
 
 compose_file() {
@@ -409,7 +410,7 @@ env_set_if_missing() {
 
 check_remnawave() {
   local url="$1" key="$2" code="" ep
-  log_i "Checking Remnawave API availability..."
+  log_i "Проверка доступности Remnawave API..."
   
   # Remove trailing slash if any
   url="${url%/}"
@@ -419,19 +420,19 @@ check_remnawave() {
       -H "Authorization: Bearer ${key}" \
       -H "X-API-KEY: ${key}" "$ep" || true)"
     [[ "$code" =~ ^2[0-9][0-9]$ || "$code" == "401" || "$code" == "403" ]] && {
-      log_ok "Remnawave responded at ${ep} (${code})."
+      log_ok "Remnawave ответил по адресу ${ep} (код: ${code})."
       return 0
     }
   done
   
-  log_w "Remnawave check failed (last code: ${code:-n/a})."
-  log_w "This might mean the URL is wrong, the API Key is invalid, or the panel is down."
+  log_w "Проверка Remnawave не удалась (код: ${code:-n/a})."
+  log_w "Это может означать неверный URL, ключ API или панель выключена."
   
   if ! is_true "$NON_INTERACTIVE"; then
     local answer=""
-    read -r -p "Do you want to continue anyway? (y/n): " answer </dev/tty
+    read -r -p "Все равно продолжить установку? (y/n): " answer </dev/tty
     if [[ ! "$answer" =~ ^(y|Y|yes|YES)$ ]]; then
-      log_e "Installation aborted by user."
+      log_e "Установка прервана пользователем."
       exit 1
     fi
   fi
@@ -790,14 +791,14 @@ collect_inputs() {
   handle_remove_action
 
   # 1. Base Domain / Nginx setup
-  echo -e "\n${BLUE}--- General Configuration ---${NC}"
+  echo -e "\n${BLUE}--- Общая конфигурация ---${NC}"
   if [[ -z "$CABINET_DOMAIN" ]]; then
-    ask CABINET_DOMAIN "Cabinet domain or server IP (e.g. bedolaga.com or 1.2.3.4)" "${detected_ip:-localhost}"
+    ask CABINET_DOMAIN "Домен или IP сервера для кабинета (например: bedolaga.com или 1.2.3.4)" "${detected_ip:-localhost}"
   fi
 
   if ! is_true "$INSTALL_BOT" && ! is_true "$INSTALL_CABINET" && is_true "$CONFIGURE_NGINX"; then
     if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]]; then
-      ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL" ""
+      ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
     fi
     validate_dns_for_domain "$detected_ip"
     return 0
@@ -805,72 +806,72 @@ collect_inputs() {
 
   # 2. Bot Configuration
   if is_true "$INSTALL_BOT"; then
-    echo -e "\n${BLUE}--- Bot Configuration ---${NC}"
+    echo -e "\n${BLUE}--- Конфигурация Бота ---${NC}"
     while true; do
-      ask BOT_TOKEN "BOT_TOKEN from @BotFather"
+      ask BOT_TOKEN "BOT_TOKEN от @BotFather"
       validate_bot_token "$BOT_TOKEN" && break || {
         if ! is_true "$NON_INTERACTIVE"; then BOT_TOKEN=""; continue; else break; fi
       }
     done
 
     while true; do
-      ask ADMIN_IDS "ADMIN_IDS (comma-separated Telegram IDs)"
+      ask ADMIN_IDS "ADMIN_IDS (ID администраторов через запятую)"
       validate_admin_ids "$ADMIN_IDS" && break || {
         if ! is_true "$NON_INTERACTIVE"; then ADMIN_IDS=""; continue; else break; fi
       }
     done
 
-    ask TELEGRAM_BOT_USERNAME "Telegram bot username without @" ""
+    ask TELEGRAM_BOT_USERNAME "Username бота без @" ""
 
     while true; do
-      ask REMNAWAVE_API_URL "REMNAWAVE_API_URL (e.g. https://panel.example.com)" ""
+      ask REMNAWAVE_API_URL "REMNAWAVE_API_URL (например: https://panel.example.com)" ""
       validate_url "$REMNAWAVE_API_URL" && break || {
         if ! is_true "$NON_INTERACTIVE"; then REMNAWAVE_API_URL=""; continue; else break; fi
       }
     done
 
     ask_secret REMNAWAVE_API_KEY "REMNAWAVE_API_KEY"
-    ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD (for bot database)"
+    ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD (пароль для базы данных бота)"
 
-    echo -e "\n${BLUE}--- Support & Pricing ---${NC}"
-    ask SUPPORT_USERNAME "Support Telegram username (e.g. @support_bot)" "$SUPPORT_USERNAME"
-    ask PRICE_30_DAYS "Price for 30 days (in kopeks, e.g. 10000 = 100 rub)" "$PRICE_30_DAYS"
-    ask PRICE_90_DAYS "Price for 90 days (in kopeks)" "$PRICE_90_DAYS"
-    ask PRICE_180_DAYS "Price for 180 days (in kopeks)" "$PRICE_180_DAYS"
+    echo -e "\n${BLUE}--- Поддержка и Цены ---${NC}"
+    ask SUPPORT_USERNAME "Username поддержки в Telegram (например: @support_bot)" "$SUPPORT_USERNAME"
+    ask PRICE_30_DAYS "Цена за 30 дней (в копейках, например: 10000 = 100 руб)" "$PRICE_30_DAYS"
+    ask PRICE_90_DAYS "Цена за 90 дней (в копейках)" "$PRICE_90_DAYS"
+    ask PRICE_180_DAYS "Цена за 180 дней (в копейках)" "$PRICE_180_DAYS"
 
-    echo -e "\n${BLUE}--- Payment Systems (Optional) ---${NC}"
-    echo -e "${YELLOW}Hint: You can skip these now and add them later by editing .env file${NC}"
-    ask CRYPTOBOT_API_TOKEN "CryptoBot API Token (press ENTER to skip)" ""
-    ask YOOKASSA_SHOP_ID "YooKassa Shop ID (press ENTER to skip)" ""
+    echo -e "\n${BLUE}--- Платежные системы (Опционально) ---${NC}"
+    echo -e "${YELLOW}Подсказка: Можно пропустить сейчас и добавить позже в .env${NC}"
+    ask CRYPTOBOT_API_TOKEN "CryptoBot API Token (нажмите ENTER чтобы пропустить)" ""
+    ask YOOKASSA_SHOP_ID "YooKassa Shop ID (нажмите ENTER чтобы пропустить)" ""
     if [[ -n "$YOOKASSA_SHOP_ID" ]]; then
       ask_secret YOOKASSA_SECRET_KEY "YooKassa Secret Key"
     fi
 
-    ask BOT_API_PORT "Internal Bot API Port (for cabinet connection)" "$BOT_API_PORT"
+    ask BOT_API_PORT "Внутренний порт API бота (для связи с кабинетом)" "$BOT_API_PORT"
   fi
 
   # 3. Cabinet Configuration
   if is_true "$INSTALL_CABINET" || is_true "$CONFIGURE_NGINX"; then
-    echo -e "\n${BLUE}--- Cabinet Configuration ---${NC}"
+    echo -e "\n${BLUE}--- Конфигурация Кабинета ---${NC}"
     
     if is_true "$INSTALL_CABINET"; then
-      ask VITE_APP_NAME "Cabinet Application Name" "$VITE_APP_NAME"
-      ask VITE_APP_LOGO "Cabinet Logo text (usually 1 letter)" "$VITE_APP_LOGO"
+      ask VITE_APP_NAME "Название приложения в кабинете" "$VITE_APP_NAME"
+      ask VITE_APP_LOGO "Текст логотипа (обычно 1 буква)" "$VITE_APP_LOGO"
       
       if [[ -z "$TELEGRAM_BOT_USERNAME" ]]; then
-        ask TELEGRAM_BOT_USERNAME "Telegram bot username without @ (for cabinet login)" ""
+        ask TELEGRAM_BOT_USERNAME "Username бота без @ (для входа в кабинет)" ""
       fi
 
       if ! is_true "$NON_INTERACTIVE"; then
-        echo "Select cabinet deployment method:"
-        echo "  image) Use prebuilt Docker image (recommended, saves RAM/Time)"
-        echo "  source) Build from source (requires 2GB+ RAM, slow)"
-        ask CABINET_DEPLOY_MODE "Mode" "$CABINET_DEPLOY_MODE"
+        echo "Выберите способ развертывания кабинета:"
+        echo "  image) Использовать готовый Docker образ (рекомендуется, экономит ОЗУ)"
+        echo "  source) Собрать из исходников (нужно 2ГБ+ ОЗУ, медленно)"
+        ask CABINET_DEPLOY_MODE "Режим" "$CABINET_DEPLOY_MODE"
       fi
     fi
 
     if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE"; then
-      ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL (required for SSL)" ""
+      ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
     fi
   fi
 
@@ -879,51 +880,51 @@ collect_inputs() {
 
 print_summary() {
   echo
-  log_ok "Installation completed."
+  log_ok "Установка завершена."
   
   if is_true "$INSTALL_BOT" || is_true "$INSTALL_CABINET"; then
-    echo -e "\n${BLUE}--- Health Check ---${NC}"
+    echo -e "\n${BLUE}--- Проверка состояния ---${NC}"
     if is_true "$INSTALL_BOT"; then
       if curl -s "http://127.0.0.1:${BOT_API_PORT}/health" >/dev/null 2>&1 || curl -s "http://127.0.0.1:${BOT_API_PORT}" >/dev/null 2>&1; then
-        log_ok "Bot API: Running"
+        log_ok "API Бота: Запущено"
       else
-        log_w "Bot API: Not responding yet (it might take a minute)"
+        log_w "API Бота: Не отвечает (возможно, запуск еще идет)"
       fi
     fi
     if [[ -n "$CABINET_DOMAIN" ]]; then
       if curl -s -I "http://${CABINET_DOMAIN}" | grep -q "200 OK\|301 Moved\|302 Found" >/dev/null 2>&1; then
-        log_ok "Cabinet URL: Accessible"
+        log_ok "URL Кабинета: Доступен"
       else
-        log_w "Cabinet URL: Not accessible from this server yet (check DNS/Firewall)"
+        log_w "URL Кабинета: Недоступен с этого сервера (проверьте DNS/Фаервол)"
       fi
     fi
   fi
 
-  echo -e "\n${BLUE}--- Paths ---${NC}"
-  echo "Bot path:      $BOT_DIR"
-  echo "Cabinet path:  $CABINET_DIR"
-  echo "Static path:   $STATIC_ROOT"
-  echo "Cabinet URL:   http://${CABINET_DOMAIN}"
+  echo -e "\n${BLUE}--- Пути и Ссылки ---${NC}"
+  echo "Путь бота:      $BOT_DIR"
+  echo "Путь кабинета:  $CABINET_DIR"
+  echo "Статика:        $STATIC_ROOT"
+  echo "URL Кабинета:   http://${CABINET_DOMAIN}"
   if is_true "$ENABLE_SSL" && [[ -n "$LETSENCRYPT_EMAIL" ]] && [[ "$CABINET_DOMAIN" != "localhost" && "$CABINET_DOMAIN" != "127.0.0.1" ]]; then
-    echo "Cabinet URL:   https://${CABINET_DOMAIN}"
+    echo "URL Кабинета:   https://${CABINET_DOMAIN}"
   fi
   echo
-  echo "Useful commands:"
-  echo "  cd $BOT_DIR && docker compose logs -f --tail 100"
-  echo "  sudo nginx -t && sudo systemctl reload nginx"
+  echo "Полезные команды:"
+  echo "  Логи бота: cd $BOT_DIR && docker compose logs -f --tail 100"
+  echo "  Проверка Nginx: sudo nginx -t && sudo systemctl reload nginx"
   echo
-  echo "To Update Bedolaga:"
-  echo "  Bot:     cd $BOT_DIR && git pull && docker compose up -d --build"
-  echo "  Cabinet: Re-run this script and choose 'Install Cabinet only'"
+  echo "Как обновить Bedolaga:"
+  echo "  Бот:     cd $BOT_DIR && git pull && docker compose up -d --build"
+  echo "  Кабинет: Запустите этот скрипт снова и выберите 'Установить только Кабинет'"
   echo
-  echo "To add/change payments later:"
-  echo "  1. Edit file: nano $BOT_DIR/.env"
-  echo "  2. Restart bot: cd $BOT_DIR && docker compose up -d"
+  echo "Как добавить платежи позже:"
+  echo "  1. Редактировать файл: nano $BOT_DIR/.env"
+  echo "  2. Перезапустить бота: cd $BOT_DIR && docker compose up -d"
   echo
-  echo "Cabinet authentication:"
-  echo "  Login/password is not used by default."
-  echo "  Sign in via Telegram in the web cabinet."
-  echo "  Admin access is controlled by ADMIN_IDS in bot .env."
+  echo "Авторизация в кабинете:"
+  echo "  Логин/пароль по умолчанию не используются."
+  echo "  Вход выполняется через Telegram в веб-интерфейсе."
+  echo "  Доступ администратора управляется через ADMIN_IDS в .env бота."
 }
 
 main() {
