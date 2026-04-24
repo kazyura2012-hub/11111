@@ -411,8 +411,43 @@ install_bot() {
 
   compose "$BOT_DIR" down -t 10 || true
   compose "$BOT_DIR" up -d --build
+  fix_bot_db_auth_if_needed
   compose "$BOT_DIR" ps || true
   log_ok "Bedolaga Bot deployed."
+}
+
+fix_bot_db_auth_if_needed() {
+  log_i "Checking bot startup status..."
+  sleep 6
+  local bot_logs
+  bot_logs="$(compose "$BOT_DIR" logs --tail 200 bot 2>/dev/null || true)"
+
+  if [[ "$bot_logs" == *"InvalidPasswordError"* || "$bot_logs" == *"password authentication failed for user"* ]]; then
+    log_w "Detected PostgreSQL password mismatch (old DB volume + new password)."
+    log_w "Fix requires DB volume reset for bot stack."
+    if is_true "$NON_INTERACTIVE"; then
+      log_w "NON_INTERACTIVE mode: skipping destructive auto-fix."
+      log_w "Run manually if needed: cd $BOT_DIR && docker compose down -v && docker compose up -d --build"
+      return 0
+    fi
+
+    local answer=""
+    if [[ -t 0 ]]; then
+      read -r -p "Reset bot DB volume now? This deletes bot database data. (type YES): " answer
+    else
+      read -r -p "Reset bot DB volume now? This deletes bot database data. (type YES): " answer </dev/tty
+    fi
+
+    if [[ "$answer" == "YES" ]]; then
+      log_i "Resetting bot stack volumes and restarting..."
+      compose "$BOT_DIR" down -v --remove-orphans || true
+      compose "$BOT_DIR" up -d --build
+      sleep 6
+      log_ok "Bot stack restarted with fresh DB volume."
+    else
+      log_w "Skipped DB volume reset by user."
+    fi
+  fi
 }
 
 build_cabinet_static() {
