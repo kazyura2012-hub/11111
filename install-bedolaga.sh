@@ -713,9 +713,9 @@ main() {
   setup_sudo
 
   need_cmd curl
-  need_cmd git
 
   ensure_packages
+  need_cmd git
   ensure_docker
   collect_inputs
   if is_true "$INSTALL_BOT"; then
