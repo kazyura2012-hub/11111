@@ -669,22 +669,22 @@ EOF
 
 setup_ssl() {
   if ! is_true "$ENABLE_SSL"; then
-    log_w "SSL disabled by configuration (ENABLE_SSL=false)."
+    log_w "SSL отключен в конфигурации (ENABLE_SSL=false)."
     return 0
   fi
   if [[ -z "$LETSENCRYPT_EMAIL" ]]; then
-    log_w "LETSENCRYPT_EMAIL is empty. SSL skipped."
+    log_w "LETSENCRYPT_EMAIL не заполнен. SSL пропущен."
     return 0
   fi
   if [[ "$CABINET_DOMAIN" == "localhost" || "$CABINET_DOMAIN" == "127.0.0.1" ]]; then
-    log_w "SSL skipped for localhost."
+    log_w "Пропуск SSL для localhost."
     return 0
   fi
-  log_i "Requesting Let's Encrypt certificate..."
+  log_i "Запрос сертификата Let's Encrypt..."
   if $SUDO certbot --nginx -d "$CABINET_DOMAIN" --non-interactive --agree-tos -m "$LETSENCRYPT_EMAIL" --redirect; then
-    log_ok "SSL enabled: https://${CABINET_DOMAIN}"
+    log_ok "SSL включен: https://${CABINET_DOMAIN}"
   else
-    log_w "Certbot failed. Verify DNS A record and open ports 80/443."
+    log_w "Ошибка Certbot. Проверьте DNS запись A и открыты ли порты 80/443."
   fi
 }
 
@@ -699,28 +699,28 @@ validate_dns_for_domain() {
 
   dns_ip="$(resolve_ipv4 "$host" || true)"
   if [[ -z "$dns_ip" ]]; then
-    log_w "Cannot resolve DNS A record for ${host} yet."
+    log_w "Не удалось разрешить DNS запись A для ${host}."
     return 0
   fi
   if [[ -n "$public_ip" && "$dns_ip" != "$public_ip" ]]; then
-    log_w "DNS A mismatch: ${host} -> ${dns_ip}, server public IP is ${public_ip}."
-    log_w "SSL may fail until DNS points to this server."
+    log_w "Несоответствие DNS A: ${host} -> ${dns_ip}, IP сервера ${public_ip}."
+    log_w "SSL может не настроиться, пока DNS не указывает на этот сервер."
   else
-    log_ok "DNS A record looks good: ${host} -> ${dns_ip}"
+    log_ok "DNS запись A корректна: ${host} -> ${dns_ip}"
   fi
 }
 
 install_cabinet() {
-  log_i "Installing Bedolaga Cabinet..."
+  log_i "Установка Кабинета Bedolaga..."
   clone_or_update "$CABINET_REPO" "$CABINET_DIR" "Bedolaga Cabinet"
   build_cabinet_static
   if is_true "$CONFIGURE_NGINX"; then
     write_nginx_conf
     setup_ssl
   else
-    log_w "Nginx setup skipped (CONFIGURE_NGINX=false)."
+    log_w "Настройка Nginx пропущена (CONFIGURE_NGINX=false)."
   fi
-  log_ok "Bedolaga Cabinet deployed."
+  log_ok "Кабинет Bedolaga развернут."
 }
 
 confirm_destructive() {
@@ -730,27 +730,27 @@ confirm_destructive() {
     return 0
   fi
   if [[ -t 0 ]]; then
-    read -r -p "$msg (type YES): " answer
+    read -r -p "$msg (введите YES для подтверждения): " answer
   else
-    read -r -p "$msg (type YES): " answer </dev/tty
+    read -r -p "$msg (введите YES для подтверждения): " answer </dev/tty
   fi
   [[ "$answer" == "YES" ]] || {
-    log_w "Cancelled."
+    log_w "Отменено."
     exit 0
   }
 }
 
 remove_bot() {
-  confirm_destructive "This will remove Bedolaga Bot containers, volumes and files. Continue?"
+  confirm_destructive "Это удалит контейнеры, тома и файлы Бота Bedolaga. Продолжить?"
   if [[ -d "$BOT_DIR" ]]; then
     compose "$BOT_DIR" down -v --remove-orphans || true
   fi
   $SUDO rm -rf "$BOT_DIR"
-  log_ok "Bot removed."
+  log_ok "Бот удален."
 }
 
 remove_cabinet() {
-  confirm_destructive "This will remove Cabinet files and nginx config. Continue?"
+  confirm_destructive "Это удалит файлы кабинета и конфигурацию nginx. Продолжить?"
   if [[ -d "$CABINET_DIR" ]]; then
     compose "$CABINET_DIR" down -v --remove-orphans || true
   fi
@@ -759,7 +759,7 @@ remove_cabinet() {
   $SUDO rm -f /etc/nginx/sites-enabled/bedolaga-cabinet.conf
   $SUDO rm -f /etc/nginx/sites-available/bedolaga-cabinet.conf
   $SUDO nginx -t >/dev/null 2>&1 && $SUDO systemctl reload nginx || true
-  log_ok "Cabinet removed."
+  log_ok "Кабинет удален."
 }
 
 handle_remove_action() {
@@ -773,7 +773,7 @@ handle_remove_action() {
       exit 0
       ;;
     remove_all)
-      confirm_destructive "This will remove BOTH bot and cabinet. Continue?"
+      confirm_destructive "Это полностью удалит И бот, И кабинет. Продолжить?"
       remove_bot
       remove_cabinet
       exit 0
