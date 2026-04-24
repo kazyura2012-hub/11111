@@ -161,10 +161,18 @@ normalize_origin() {
   fi
 }
 
+apt_update() {
+  DEBIAN_FRONTEND=noninteractive $SUDO apt-get update -qq
+}
+
+apt_install() {
+  DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq "$@"
+}
+
 ensure_packages() {
   log_i "Installing system dependencies..."
-  $SUDO apt-get update -qq
-  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  apt_update
+  apt_install \
     ca-certificates curl wget git jq openssl nginx certbot python3-certbot-nginx
   log_ok "Dependencies installed."
 }
@@ -177,7 +185,7 @@ ensure_docker() {
     rm -f /tmp/get-docker.sh
   fi
   if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-    $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-compose-plugin || true
+    apt_install docker-compose-plugin || true
   fi
   docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1 || {
     log_e "docker compose is unavailable."
