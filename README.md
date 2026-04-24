@@ -1,1 +1,1 @@
-bash <(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/install-bedolaga.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/kazyura2012-hub/11111/main/install-bedolaga.sh)
