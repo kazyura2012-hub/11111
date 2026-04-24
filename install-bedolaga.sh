@@ -198,6 +198,33 @@ ask_secret() {
   printf -v "$var_name" '%s' "$value"
 }
 
+validate_bot_token() {
+  local token="$1"
+  if [[ ! "$token" =~ ^[0-9]{8,12}:[a-zA-Z0-9_-]{35}$ ]]; then
+    log_w "Warning: BOT_TOKEN format looks unusual. Should be like 12345678:ABCDEF..."
+    return 1
+  fi
+  return 0
+}
+
+validate_admin_ids() {
+  local ids="$1"
+  if [[ ! "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    log_e "Error: ADMIN_IDS must be comma-separated numbers (e.g. 12345678,98765432)"
+    return 1
+  fi
+  return 0
+}
+
+validate_url() {
+  local url="$1"
+  if [[ ! "$url" =~ ^https?:// ]]; then
+    log_e "Error: URL must start with http:// or https://"
+    return 1
+  fi
+  return 0
+}
+
 auto_public_ip() {
   curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true
 }
@@ -236,8 +263,54 @@ ensure_packages() {
   log_i "Installing system dependencies..."
   apt_update
   apt_install \
-    ca-certificates curl wget git jq openssl nginx certbot python3-certbot-nginx
+    ca-certificates curl wget git jq openssl nginx certbot python3-certbot-nginx ufw
   log_ok "Dependencies installed."
+}
+
+ensure_swap() {
+  local ram_kb
+  ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  if [[ "$ram_kb" -lt 1900000 ]]; then
+    log_w "Detected low RAM ($((ram_kb / 1024)) MB)."
+    if [[ -f /swapfile ]]; then
+      log_i "Swap already exists."
+      return 0
+    fi
+    
+    if is_true "$NON_INTERACTIVE"; then
+      log_i "Creating 2GB swap file automatically..."
+    else
+      local answer=""
+      read -r -p "Create 2GB swap file to prevent build failures? (y/n): " answer </dev/tty
+      [[ "$answer" =~ ^(y|Y|yes|YES)$ ]] || return 0
+    fi
+    
+    log_i "Creating swap..."
+    $SUDO fallocate -l 2G /swapfile
+    $SUDO chmod 600 /swapfile
+    $SUDO mkswap /swapfile
+    $SUDO swapon /swapfile
+    echo '/swapfile none swap sw 0 0' | $SUDO tee -a /etc/fstab
+    log_ok "Swap file created."
+  fi
+}
+
+setup_firewall() {
+  if ! command -v ufw >/dev/null 2>&1; then return 0; fi
+  
+  if is_true "$NON_INTERACTIVE"; then return 0; fi
+
+  local answer=""
+  echo -e "\n${BLUE}--- Security ---${NC}"
+  read -r -p "Configure UFW firewall? (allows SSH, 80, 443) (y/n): " answer </dev/tty
+  if [[ "$answer" =~ ^(y|Y|yes|YES)$ ]]; then
+    log_i "Configuring firewall..."
+    $SUDO ufw allow 22/tcp
+    $SUDO ufw allow 80/tcp
+    $SUDO ufw allow 443/tcp
+    $SUDO ufw --force enable
+    log_ok "Firewall enabled."
+  fi
 }
 
 ensure_docker() {
@@ -337,6 +410,10 @@ env_set_if_missing() {
 check_remnawave() {
   local url="$1" key="$2" code="" ep
   log_i "Checking Remnawave API availability..."
+  
+  # Remove trailing slash if any
+  url="${url%/}"
+
   for ep in "$url/health" "$url/api/health" "$url"; do
     code="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 \
       -H "Authorization: Bearer ${key}" \
@@ -346,12 +423,24 @@ check_remnawave() {
       return 0
     }
   done
-  log_w "Remnawave check failed (last code: ${code:-n/a}). Continuing anyway."
+  
+  log_w "Remnawave check failed (last code: ${code:-n/a})."
+  log_w "This might mean the URL is wrong, the API Key is invalid, or the panel is down."
+  
+  if ! is_true "$NON_INTERACTIVE"; then
+    local answer=""
+    read -r -p "Do you want to continue anyway? (y/n): " answer </dev/tty
+    if [[ ! "$answer" =~ ^(y|Y|yes|YES)$ ]]; then
+      log_e "Installation aborted by user."
+      exit 1
+    fi
+  fi
 }
 
 configure_bot_env() {
   local env_file="$1" cabinet_origin="$2"
 
+  log_i "Configuring .env for Bot..."
   env_set "$env_file" "BOT_TOKEN" "$BOT_TOKEN"
   env_set "$env_file" "ADMIN_IDS" "$ADMIN_IDS"
   env_set "$env_file" "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
@@ -364,22 +453,14 @@ configure_bot_env() {
   env_set "$env_file" "PRICE_90_DAYS" "$PRICE_90_DAYS"
   env_set "$env_file" "PRICE_180_DAYS" "$PRICE_180_DAYS"
 
-  env_set "$env_file" "ADMIN_REPORTS_TOPIC_ID" "0"
-  env_set "$env_file" "MULENPAY_SHOP_ID" "0"
-  env_set "$env_file" "FREEKASSA_SHOP_ID" "0"
-  env_set "$env_file" "FREEKASSA_PAYMENT_SYSTEM_ID" "0"
-  env_set "$env_file" "KASSA_AI_SHOP_ID" "0"
-  env_set "$env_file" "SEVERPAY_MID" "0"
-  env_set "$env_file" "LOG_ROTATION_TOPIC_ID" "0"
-  env_set "$env_file" "BACKUP_AUTO_ENABLED" "false"
-  env_set "$env_file" "BACKUP_SEND_ENABLED" "false"
-
+  # Payment settings
   env_set "$env_file" "CRYPTOBOT_ENABLED" "$([[ -n "$CRYPTOBOT_API_TOKEN" ]] && echo "true" || echo "false")"
   env_set "$env_file" "CRYPTOBOT_API_TOKEN" "$CRYPTOBOT_API_TOKEN"
   env_set "$env_file" "YOOKASSA_ENABLED" "$([[ -n "$YOOKASSA_SHOP_ID" ]] && echo "true" || echo "false")"
   env_set "$env_file" "YOOKASSA_SHOP_ID" "$YOOKASSA_SHOP_ID"
   env_set "$env_file" "YOOKASSA_SECRET_KEY" "$YOOKASSA_SECRET_KEY"
 
+  # API & Cabinet integration
   env_set "$env_file" "WEB_API_ENABLED" "true"
   env_set "$env_file" "WEB_API_PORT" "$BOT_API_PORT"
   env_set "$env_file" "CABINET_ENABLED" "true"
@@ -393,11 +474,19 @@ configure_bot_env() {
     env_set "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "$TELEGRAM_BOT_USERNAME"
   fi
 
+  # Branding (synced with Cabinet if possible)
+  env_set "$env_file" "APP_NAME" "$VITE_APP_NAME"
+
+  # Defaults
   env_set "$env_file" "TZ" "Europe/Moscow"
   env_set "$env_file" "DEFAULT_LANGUAGE" "ru"
   env_set "$env_file" "ENABLE_LOGO_MODE" "true"
   env_set "$env_file" "LOG_LEVEL" "INFO"
   env_set "$env_file" "DEBUG" "false"
+  
+  # Topic IDs (default 0 for disabling)
+  env_set_if_missing "$env_file" "ADMIN_REPORTS_TOPIC_ID" "0"
+  env_set_if_missing "$env_file" "LOG_ROTATION_TOPIC_ID" "0"
 }
 
 install_bot() {
@@ -489,24 +578,33 @@ build_cabinet_static_from_image() {
 build_cabinet_static_from_source() {
   local env_file="$CABINET_DIR/.env"
   ensure_env "$CABINET_DIR"
+  
+  log_i "Configuring .env for Cabinet build..."
   env_set "$env_file" "VITE_API_URL" "/api"
   env_set "$env_file" "VITE_TELEGRAM_BOT_USERNAME" "$TELEGRAM_BOT_USERNAME"
   env_set "$env_file" "VITE_APP_NAME" "$VITE_APP_NAME"
   env_set "$env_file" "VITE_APP_LOGO" "$VITE_APP_LOGO"
 
   log_i "Building Bedolaga Cabinet static files from source..."
+  log_w "This may take several minutes and requires at least 2GB RAM."
+  
+  # Pass env vars to docker compose build if needed, though .env should be picked up
   compose "$CABINET_DIR" build cabinet-frontend
   compose "$CABINET_DIR" create cabinet-frontend
+  
   local cid
   cid="$(compose "$CABINET_DIR" ps -q cabinet-frontend | tr -d '\r\n')"
   [[ -n "$cid" ]] || {
     log_e "Cannot detect cabinet-frontend container."
     exit 1
   }
+  
   $SUDO mkdir -p "$STATIC_ROOT"
   $SUDO rm -rf "${STATIC_ROOT:?}/"*
   $SUDO docker cp "${cid}:/usr/share/nginx/html/." "$STATIC_ROOT/"
   compose "$CABINET_DIR" rm -sf cabinet-frontend || true
+  
+  $SUDO chown -R www-data:www-data "$STATIC_ROOT" || true
   log_ok "Cabinet static files prepared at $STATIC_ROOT."
 }
 
@@ -514,6 +612,11 @@ write_nginx_conf() {
   local conf="/etc/nginx/sites-available/bedolaga-cabinet.conf"
   local enabled="/etc/nginx/sites-enabled/bedolaga-cabinet.conf"
   local upstream="http://127.0.0.1:${BOT_API_PORT}"
+
+  log_i "Configuring Nginx for ${CABINET_DOMAIN}..."
+  $SUDO mkdir -p "$STATIC_ROOT"
+  $SUDO chown -R www-data:www-data "$STATIC_ROOT" || true
+  $SUDO chmod -R 755 "$STATIC_ROOT" || true
 
   $SUDO tee "$conf" >/dev/null <<EOF
 server {
@@ -523,6 +626,8 @@ server {
     root ${STATIC_ROOT};
     index index.html;
 
+    client_max_body_size 10M;
+
     location /api/ {
         rewrite ^/api/(.*) /\$1 break;
         proxy_pass ${upstream};
@@ -531,6 +636,8 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300;
+        proxy_connect_timeout 300;
     }
 
     location ~* \.(?:js|css|woff2?|ttf|ico|png|jpe?g|svg|webp|gif)$ {
@@ -548,10 +655,15 @@ EOF
 
   [[ -L "$enabled" ]] || $SUDO ln -s "$conf" "$enabled"
   $SUDO rm -f /etc/nginx/sites-enabled/default
-  $SUDO systemctl enable --now nginx
-  $SUDO nginx -t
-  $SUDO systemctl reload nginx
-  log_ok "Nginx reverse proxy configured."
+  
+  if $SUDO nginx -t; then
+    $SUDO systemctl enable --now nginx
+    $SUDO systemctl reload nginx
+    log_ok "Nginx reverse proxy configured for ${CABINET_DOMAIN}."
+  else
+    log_e "Nginx configuration test failed. Please check $conf"
+    exit 1
+  fi
 }
 
 setup_ssl() {
@@ -677,45 +789,89 @@ collect_inputs() {
   fi
   handle_remove_action
 
+  # 1. Base Domain / Nginx setup
+  echo -e "\n${BLUE}--- General Configuration ---${NC}"
+  if [[ -z "$CABINET_DOMAIN" ]]; then
+    ask CABINET_DOMAIN "Cabinet domain or server IP (e.g. bedolaga.com or 1.2.3.4)" "${detected_ip:-localhost}"
+  fi
+
   if ! is_true "$INSTALL_BOT" && ! is_true "$INSTALL_CABINET" && is_true "$CONFIGURE_NGINX"; then
-    ask CABINET_DOMAIN "Cabinet domain for Nginx/SSL" "${detected_ip:-localhost}"
     if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]]; then
-      ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL (required for SSL)" ""
+      ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL" ""
     fi
     validate_dns_for_domain "$detected_ip"
     return 0
   fi
 
+  # 2. Bot Configuration
   if is_true "$INSTALL_BOT"; then
-    ask BOT_TOKEN "BOT_TOKEN from @BotFather"
-    ask ADMIN_IDS "ADMIN_IDS (comma-separated Telegram IDs)"
+    echo -e "\n${BLUE}--- Bot Configuration ---${NC}"
+    while true; do
+      ask BOT_TOKEN "BOT_TOKEN from @BotFather"
+      validate_bot_token "$BOT_TOKEN" && break || {
+        if ! is_true "$NON_INTERACTIVE"; then BOT_TOKEN=""; continue; else break; fi
+      }
+    done
+
+    while true; do
+      ask ADMIN_IDS "ADMIN_IDS (comma-separated Telegram IDs)"
+      validate_admin_ids "$ADMIN_IDS" && break || {
+        if ! is_true "$NON_INTERACTIVE"; then ADMIN_IDS=""; continue; else break; fi
+      }
+    done
+
     ask TELEGRAM_BOT_USERNAME "Telegram bot username without @" ""
-    ask REMNAWAVE_API_URL "REMNAWAVE_API_URL (https://...)" ""
+
+    while true; do
+      ask REMNAWAVE_API_URL "REMNAWAVE_API_URL (e.g. https://panel.example.com)" ""
+      validate_url "$REMNAWAVE_API_URL" && break || {
+        if ! is_true "$NON_INTERACTIVE"; then REMNAWAVE_API_URL=""; continue; else break; fi
+      }
+    done
+
     ask_secret REMNAWAVE_API_KEY "REMNAWAVE_API_KEY"
-    ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD"
-    ask SUPPORT_USERNAME "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
-    ask PRICE_30_DAYS "PRICE_30_DAYS in kopeks" "$PRICE_30_DAYS"
-    ask PRICE_90_DAYS "PRICE_90_DAYS in kopeks" "$PRICE_90_DAYS"
-    ask PRICE_180_DAYS "PRICE_180_DAYS in kopeks" "$PRICE_180_DAYS"
-  fi
+    ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD (for bot database)"
 
-  if [[ -z "$CABINET_DOMAIN" ]]; then
-    if is_true "$NON_INTERACTIVE"; then
-      CABINET_DOMAIN="${detected_ip:-localhost}"
-    else
-      ask CABINET_DOMAIN "Cabinet domain (required for DNS/SSL check) or server IP" "${detected_ip:-localhost}"
+    echo -e "\n${BLUE}--- Support & Pricing ---${NC}"
+    ask SUPPORT_USERNAME "Support Telegram username (e.g. @support_bot)" "$SUPPORT_USERNAME"
+    ask PRICE_30_DAYS "Price for 30 days (in kopeks, e.g. 10000 = 100 rub)" "$PRICE_30_DAYS"
+    ask PRICE_90_DAYS "Price for 90 days (in kopeks)" "$PRICE_90_DAYS"
+    ask PRICE_180_DAYS "Price for 180 days (in kopeks)" "$PRICE_180_DAYS"
+
+    echo -e "\n${BLUE}--- Payment Systems (Optional) ---${NC}"
+    echo -e "${YELLOW}Hint: You can skip these now and add them later by editing .env file${NC}"
+    ask CRYPTOBOT_API_TOKEN "CryptoBot API Token (press ENTER to skip)" ""
+    ask YOOKASSA_SHOP_ID "YooKassa Shop ID (press ENTER to skip)" ""
+    if [[ -n "$YOOKASSA_SHOP_ID" ]]; then
+      ask_secret YOOKASSA_SECRET_KEY "YooKassa Secret Key"
     fi
+
+    ask BOT_API_PORT "Internal Bot API Port (for cabinet connection)" "$BOT_API_PORT"
   fi
 
-  if is_true "$INSTALL_CABINET"; then
-    ask TELEGRAM_BOT_USERNAME "Telegram bot username without @ (for cabinet auth button)" "$TELEGRAM_BOT_USERNAME"
-    if ! is_true "$NON_INTERACTIVE"; then
-      ask CABINET_DEPLOY_MODE "Cabinet deploy mode: image/source/auto" "$CABINET_DEPLOY_MODE"
+  # 3. Cabinet Configuration
+  if is_true "$INSTALL_CABINET" || is_true "$CONFIGURE_NGINX"; then
+    echo -e "\n${BLUE}--- Cabinet Configuration ---${NC}"
+    
+    if is_true "$INSTALL_CABINET"; then
+      ask VITE_APP_NAME "Cabinet Application Name" "$VITE_APP_NAME"
+      ask VITE_APP_LOGO "Cabinet Logo text (usually 1 letter)" "$VITE_APP_LOGO"
+      
+      if [[ -z "$TELEGRAM_BOT_USERNAME" ]]; then
+        ask TELEGRAM_BOT_USERNAME "Telegram bot username without @ (for cabinet login)" ""
+      fi
+
+      if ! is_true "$NON_INTERACTIVE"; then
+        echo "Select cabinet deployment method:"
+        echo "  image) Use prebuilt Docker image (recommended, saves RAM/Time)"
+        echo "  source) Build from source (requires 2GB+ RAM, slow)"
+        ask CABINET_DEPLOY_MODE "Mode" "$CABINET_DEPLOY_MODE"
+      fi
     fi
-  fi
 
-  if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE"; then
-    ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL (required for SSL)" ""
+    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE"; then
+      ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL (required for SSL)" ""
+    fi
   fi
 
   validate_dns_for_domain "$detected_ip"
@@ -724,6 +880,26 @@ collect_inputs() {
 print_summary() {
   echo
   log_ok "Installation completed."
+  
+  if is_true "$INSTALL_BOT" || is_true "$INSTALL_CABINET"; then
+    echo -e "\n${BLUE}--- Health Check ---${NC}"
+    if is_true "$INSTALL_BOT"; then
+      if curl -s "http://127.0.0.1:${BOT_API_PORT}/health" >/dev/null 2>&1 || curl -s "http://127.0.0.1:${BOT_API_PORT}" >/dev/null 2>&1; then
+        log_ok "Bot API: Running"
+      else
+        log_w "Bot API: Not responding yet (it might take a minute)"
+      fi
+    fi
+    if [[ -n "$CABINET_DOMAIN" ]]; then
+      if curl -s -I "http://${CABINET_DOMAIN}" | grep -q "200 OK\|301 Moved\|302 Found" >/dev/null 2>&1; then
+        log_ok "Cabinet URL: Accessible"
+      else
+        log_w "Cabinet URL: Not accessible from this server yet (check DNS/Firewall)"
+      fi
+    fi
+  fi
+
+  echo -e "\n${BLUE}--- Paths ---${NC}"
   echo "Bot path:      $BOT_DIR"
   echo "Cabinet path:  $CABINET_DIR"
   echo "Static path:   $STATIC_ROOT"
@@ -735,6 +911,14 @@ print_summary() {
   echo "Useful commands:"
   echo "  cd $BOT_DIR && docker compose logs -f --tail 100"
   echo "  sudo nginx -t && sudo systemctl reload nginx"
+  echo
+  echo "To Update Bedolaga:"
+  echo "  Bot:     cd $BOT_DIR && git pull && docker compose up -d --build"
+  echo "  Cabinet: Re-run this script and choose 'Install Cabinet only'"
+  echo
+  echo "To add/change payments later:"
+  echo "  1. Edit file: nano $BOT_DIR/.env"
+  echo "  2. Restart bot: cd $BOT_DIR && docker compose up -d"
   echo
   echo "Cabinet authentication:"
   echo "  Login/password is not used by default."
@@ -750,9 +934,13 @@ main() {
   need_cmd curl
 
   ensure_packages
+  ensure_swap
   need_cmd git
   ensure_docker
+  
   collect_inputs
+  setup_firewall
+  
   if is_true "$INSTALL_BOT"; then
     check_remnawave "$REMNAWAVE_API_URL" "$REMNAWAVE_API_KEY"
   fi
