@@ -52,6 +52,7 @@ YOOKASSA_SECRET_KEY="${YOOKASSA_SECRET_KEY:-}"
 VITE_APP_NAME="${VITE_APP_NAME:-Cabinet}"
 VITE_APP_LOGO="${VITE_APP_LOGO:-V}"
 BOT_API_PORT="${BOT_API_PORT:-8080}"
+CABINET_DEPLOY_MODE="${CABINET_DEPLOY_MODE:-image}" # image|source|auto
 
 SUDO=""
 
@@ -98,6 +99,36 @@ need_cmd() {
 
 is_true() {
   [[ "${1,,}" =~ ^(1|true|yes|y)$ ]]
+}
+
+show_menu() {
+  local choice=""
+  echo
+  echo "Select action:"
+  echo "  1) Install/Update Bot + Cabinet (recommended)"
+  echo "  2) Install/Update Bot only"
+  echo "  3) Install/Update Cabinet only"
+  echo "  4) Configure Nginx/SSL only (for existing cabinet static files)"
+  echo "  5) Remove Bot only"
+  echo "  6) Remove Cabinet only"
+  echo "  7) Remove Bot + Cabinet"
+  echo "  8) Exit"
+  if [[ -t 0 ]]; then
+    read -r -p "Enter choice [1-8]: " choice
+  else
+    read -r -p "Enter choice [1-8]: " choice </dev/tty
+  fi
+  case "$choice" in
+    1) INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
+    2) INSTALL_BOT="true"; INSTALL_CABINET="false" ;;
+    3) INSTALL_BOT="false"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
+    4) INSTALL_BOT="false"; INSTALL_CABINET="false"; CONFIGURE_NGINX="true" ;;
+    5) ACTION="remove_bot" ;;
+    6) ACTION="remove_cabinet" ;;
+    7) ACTION="remove_all" ;;
+    8) log_i "Exit by user choice."; exit 0 ;;
+    *) log_w "Invalid choice, using default: option 1."; INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
+  esac
 }
 
 ask() {
@@ -169,6 +200,17 @@ ask_secret() {
 
 auto_public_ip() {
   curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true
+}
+
+resolve_ipv4() {
+  local host="$1"
+  if command -v getent >/dev/null 2>&1; then
+    getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | head -n1
+  elif command -v nslookup >/dev/null 2>&1; then
+    nslookup "$host" 2>/dev/null | awk '/^Address: /{print $2}' | tail -n1
+  else
+    echo ""
+  fi
 }
 
 normalize_origin() {
@@ -374,6 +416,42 @@ install_bot() {
 }
 
 build_cabinet_static() {
+  local mode="${CABINET_DEPLOY_MODE,,}"
+  if [[ "$mode" != "image" && "$mode" != "source" && "$mode" != "auto" ]]; then
+    log_w "Unknown CABINET_DEPLOY_MODE='${CABINET_DEPLOY_MODE}', using 'image'."
+    mode="image"
+  fi
+  if [[ "$mode" == "auto" || "$mode" == "image" ]]; then
+    if build_cabinet_static_from_image; then
+      return 0
+    fi
+    if [[ "$mode" == "image" ]]; then
+      log_e "Cabinet image mode failed. Set CABINET_DEPLOY_MODE=source to force source build."
+      exit 1
+    fi
+    log_w "Falling back to source build due to image failure."
+  fi
+  build_cabinet_static_from_source
+}
+
+build_cabinet_static_from_image() {
+  local image="ghcr.io/bedolaga-dev/bedolaga-cabinet:latest"
+  local temp_name="tmp_bedolaga_cabinet_$$"
+  log_i "Using prebuilt cabinet image (low RAM mode): $image"
+  if ! $SUDO docker pull "$image"; then
+    log_w "Cannot pull image from GHCR."
+    return 1
+  fi
+  $SUDO docker create --name "$temp_name" "$image" >/dev/null
+  $SUDO mkdir -p "$STATIC_ROOT"
+  $SUDO rm -rf "${STATIC_ROOT:?}/"*
+  $SUDO docker cp "${temp_name}:/usr/share/nginx/html/." "$STATIC_ROOT/"
+  $SUDO docker rm -f "$temp_name" >/dev/null 2>&1 || true
+  log_ok "Cabinet static files copied from prebuilt image."
+  return 0
+}
+
+build_cabinet_static_from_source() {
   local env_file="$CABINET_DIR/.env"
   ensure_env "$CABINET_DIR"
   env_set "$env_file" "VITE_API_URL" "/api"
@@ -381,7 +459,7 @@ build_cabinet_static() {
   env_set "$env_file" "VITE_APP_NAME" "$VITE_APP_NAME"
   env_set "$env_file" "VITE_APP_LOGO" "$VITE_APP_LOGO"
 
-  log_i "Building Bedolaga Cabinet static files..."
+  log_i "Building Bedolaga Cabinet static files from source..."
   compose "$CABINET_DIR" build cabinet-frontend
   compose "$CABINET_DIR" create cabinet-frontend
   local cid
@@ -462,6 +540,28 @@ setup_ssl() {
   fi
 }
 
+validate_dns_for_domain() {
+  local public_ip="$1"
+  local dns_ip=""
+  local host="${CABINET_DOMAIN}"
+
+  [[ -n "$host" ]] || return 0
+  [[ "$host" == "localhost" || "$host" == "127.0.0.1" ]] && return 0
+  [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && return 0
+
+  dns_ip="$(resolve_ipv4 "$host" || true)"
+  if [[ -z "$dns_ip" ]]; then
+    log_w "Cannot resolve DNS A record for ${host} yet."
+    return 0
+  fi
+  if [[ -n "$public_ip" && "$dns_ip" != "$public_ip" ]]; then
+    log_w "DNS A mismatch: ${host} -> ${dns_ip}, server public IP is ${public_ip}."
+    log_w "SSL may fail until DNS points to this server."
+  else
+    log_ok "DNS A record looks good: ${host} -> ${dns_ip}"
+  fi
+}
+
 install_cabinet() {
   log_i "Installing Bedolaga Cabinet..."
   clone_or_update "$CABINET_REPO" "$CABINET_DIR" "Bedolaga Cabinet"
@@ -475,31 +575,115 @@ install_cabinet() {
   log_ok "Bedolaga Cabinet deployed."
 }
 
+confirm_destructive() {
+  local msg="$1"
+  local answer=""
+  if is_true "$NON_INTERACTIVE"; then
+    return 0
+  fi
+  if [[ -t 0 ]]; then
+    read -r -p "$msg (type YES): " answer
+  else
+    read -r -p "$msg (type YES): " answer </dev/tty
+  fi
+  [[ "$answer" == "YES" ]] || {
+    log_w "Cancelled."
+    exit 0
+  }
+}
+
+remove_bot() {
+  confirm_destructive "This will remove Bedolaga Bot containers, volumes and files. Continue?"
+  if [[ -d "$BOT_DIR" ]]; then
+    compose "$BOT_DIR" down -v --remove-orphans || true
+  fi
+  $SUDO rm -rf "$BOT_DIR"
+  log_ok "Bot removed."
+}
+
+remove_cabinet() {
+  confirm_destructive "This will remove Cabinet files and nginx config. Continue?"
+  if [[ -d "$CABINET_DIR" ]]; then
+    compose "$CABINET_DIR" down -v --remove-orphans || true
+  fi
+  $SUDO rm -rf "$CABINET_DIR"
+  $SUDO rm -rf "$STATIC_ROOT"
+  $SUDO rm -f /etc/nginx/sites-enabled/bedolaga-cabinet.conf
+  $SUDO rm -f /etc/nginx/sites-available/bedolaga-cabinet.conf
+  $SUDO nginx -t >/dev/null 2>&1 && $SUDO systemctl reload nginx || true
+  log_ok "Cabinet removed."
+}
+
+handle_remove_action() {
+  case "${ACTION:-}" in
+    remove_bot)
+      remove_bot
+      exit 0
+      ;;
+    remove_cabinet)
+      remove_cabinet
+      exit 0
+      ;;
+    remove_all)
+      confirm_destructive "This will remove BOTH bot and cabinet. Continue?"
+      remove_bot
+      remove_cabinet
+      exit 0
+      ;;
+  esac
+}
+
 collect_inputs() {
   local detected_ip
   detected_ip="$(auto_public_ip)"
 
-  ask BOT_TOKEN "BOT_TOKEN from @BotFather"
-  ask ADMIN_IDS "ADMIN_IDS (comma-separated Telegram IDs)"
-  ask TELEGRAM_BOT_USERNAME "Telegram bot username without @" ""
-  ask REMNAWAVE_API_URL "REMNAWAVE_API_URL (https://...)" ""
-  ask_secret REMNAWAVE_API_KEY "REMNAWAVE_API_KEY"
-  ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD"
+  if ! is_true "$NON_INTERACTIVE"; then
+    show_menu
+  fi
+  handle_remove_action
 
-  ask SUPPORT_USERNAME "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
-  ask PRICE_30_DAYS "PRICE_30_DAYS in kopeks" "$PRICE_30_DAYS"
-  ask PRICE_90_DAYS "PRICE_90_DAYS in kopeks" "$PRICE_90_DAYS"
-  ask PRICE_180_DAYS "PRICE_180_DAYS in kopeks" "$PRICE_180_DAYS"
+  if ! is_true "$INSTALL_BOT" && ! is_true "$INSTALL_CABINET" && is_true "$CONFIGURE_NGINX"; then
+    ask CABINET_DOMAIN "Cabinet domain for Nginx/SSL" "${detected_ip:-localhost}"
+    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]]; then
+      ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL (required for SSL)" ""
+    fi
+    validate_dns_for_domain "$detected_ip"
+    return 0
+  fi
+
+  if is_true "$INSTALL_BOT"; then
+    ask BOT_TOKEN "BOT_TOKEN from @BotFather"
+    ask ADMIN_IDS "ADMIN_IDS (comma-separated Telegram IDs)"
+    ask TELEGRAM_BOT_USERNAME "Telegram bot username without @" ""
+    ask REMNAWAVE_API_URL "REMNAWAVE_API_URL (https://...)" ""
+    ask_secret REMNAWAVE_API_KEY "REMNAWAVE_API_KEY"
+    ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD"
+    ask SUPPORT_USERNAME "SUPPORT_USERNAME" "$SUPPORT_USERNAME"
+    ask PRICE_30_DAYS "PRICE_30_DAYS in kopeks" "$PRICE_30_DAYS"
+    ask PRICE_90_DAYS "PRICE_90_DAYS in kopeks" "$PRICE_90_DAYS"
+    ask PRICE_180_DAYS "PRICE_180_DAYS in kopeks" "$PRICE_180_DAYS"
+  fi
 
   if [[ -z "$CABINET_DOMAIN" ]]; then
-    if [[ -n "$detected_ip" ]]; then
-      CABINET_DOMAIN="$detected_ip"
-    elif is_true "$NON_INTERACTIVE"; then
-      CABINET_DOMAIN="localhost"
+    if is_true "$NON_INTERACTIVE"; then
+      CABINET_DOMAIN="${detected_ip:-localhost}"
     else
-      ask CABINET_DOMAIN "Cabinet domain (or server IP)" "localhost"
+      ask CABINET_DOMAIN "Cabinet domain (required for DNS/SSL check) or server IP" "${detected_ip:-localhost}"
     fi
   fi
+
+  if is_true "$INSTALL_CABINET"; then
+    ask TELEGRAM_BOT_USERNAME "Telegram bot username without @ (for cabinet auth button)" "$TELEGRAM_BOT_USERNAME"
+    if ! is_true "$NON_INTERACTIVE"; then
+      ask CABINET_DEPLOY_MODE "Cabinet deploy mode: image/source/auto" "$CABINET_DEPLOY_MODE"
+    fi
+  fi
+
+  if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE"; then
+    ask LETSENCRYPT_EMAIL "Email for Let's Encrypt SSL (required for SSL)" ""
+  fi
+
+  validate_dns_for_domain "$detected_ip"
 }
 
 print_summary() {
@@ -516,6 +700,11 @@ print_summary() {
   echo "Useful commands:"
   echo "  cd $BOT_DIR && docker compose logs -f --tail 100"
   echo "  sudo nginx -t && sudo systemctl reload nginx"
+  echo
+  echo "Cabinet authentication:"
+  echo "  Login/password is not used by default."
+  echo "  Sign in via Telegram in the web cabinet."
+  echo "  Admin access is controlled by ADMIN_IDS in bot .env."
 }
 
 main() {
@@ -529,7 +718,9 @@ main() {
   ensure_packages
   ensure_docker
   collect_inputs
-  check_remnawave "$REMNAWAVE_API_URL" "$REMNAWAVE_API_KEY"
+  if is_true "$INSTALL_BOT"; then
+    check_remnawave "$REMNAWAVE_API_URL" "$REMNAWAVE_API_KEY"
+  fi
 
   if is_true "$INSTALL_BOT"; then
     install_bot
@@ -539,6 +730,9 @@ main() {
 
   if is_true "$INSTALL_CABINET"; then
     install_cabinet
+  elif is_true "$CONFIGURE_NGINX"; then
+    write_nginx_conf
+    setup_ssl
   else
     log_w "INSTALL_CABINET=false, cabinet deployment skipped."
   fi
