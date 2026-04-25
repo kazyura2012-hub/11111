@@ -127,11 +127,13 @@ show_menu() {
   echo "  6) Удалить только Кабинет"
   echo "  7) Полное удаление (Бот + Кабинет)"
   echo "  8) Режим ремонта (починить домен/SSL/вход/уведомления)"
-  echo "  9) Выход"
+  echo "  9) Меню настроек (авторизация, SMTP, OAuth, уведомления)"
+  echo " 10) Меню обслуживания (обновления/перезапуск/SSL/проверки)"
+  echo " 11) Выход"
   if [[ -t 0 ]]; then
-    read -r -p "Введите выбор [1-9]: " choice
+    read -r -p "Введите выбор [1-11]: " choice
   else
-    read -r -p "Введите выбор [1-9]: " choice </dev/tty
+    read -r -p "Введите выбор [1-11]: " choice </dev/tty
   fi
   case "$choice" in
     1) INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
@@ -142,7 +144,9 @@ show_menu() {
     6) ACTION="remove_cabinet" ;;
     7) ACTION="remove_all" ;;
     8) ACTION="repair_install" ;;
-    9) log_i "Выход."; exit 0 ;;
+    9) ACTION="settings_menu" ;;
+    10) ACTION="ops_menu" ;;
+    11) log_i "Выход."; exit 0 ;;
     *) log_w "Неверный выбор, используем вариант 1."; INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
   esac
 }
@@ -234,6 +238,47 @@ ask_optional() {
 
   value="${value:-$default}"
   printf -v "$var_name" '%s' "$value"
+}
+
+ask_yes_no() {
+  local var_name="$1"
+  local prompt="$2"
+  local default="${3:-false}"
+  local value normalized
+  local suffix="[y/N]"
+  is_true "$default" && suffix="[Y/n]"
+
+  if is_true "$NON_INTERACTIVE"; then
+    if [[ -n "${!var_name}" ]]; then
+      return 0
+    fi
+    printf -v "$var_name" '%s' "$default"
+    return 0
+  fi
+
+  while true; do
+    if [[ -t 0 ]]; then
+      read -r -p "$prompt $suffix: " value
+    else
+      read -r -p "$prompt $suffix: " value </dev/tty
+    fi
+
+    value="${value:-$default}"
+    normalized="${value,,}"
+    case "$normalized" in
+      y|yes|1|true)
+        printf -v "$var_name" '%s' "true"
+        return 0
+        ;;
+      n|no|0|false)
+        printf -v "$var_name" '%s' "false"
+        return 0
+        ;;
+      *)
+        log_w "Введите y или n."
+        ;;
+    esac
+  done
 }
 
 validate_bot_token() {
@@ -392,7 +437,7 @@ setup_firewall() {
   
   if is_true "$NON_INTERACTIVE"; then return 0; fi
 
-  local answer=""
+  local restart_answer=""
   echo -e "\n${BLUE}--- Безопасность ---${NC}"
   read -r -p "Настроить фаервол UFW? (разрешит SSH, 80, 443) (y/n): " answer </dev/tty
   if [[ "$answer" =~ ^(y|Y|yes|YES)$ ]]; then
@@ -517,6 +562,17 @@ env_get() {
   value="${value%\'}"
   value="${value#\'}"
   printf '%s' "$value"
+}
+
+load_runtime_from_bot_env() {
+  local env_file="$BOT_DIR/.env"
+  ensure_env "$BOT_DIR"
+  BOT_TOKEN="${BOT_TOKEN:-$(env_get "$env_file" "BOT_TOKEN" "")}"
+  BOT_API_PORT="${BOT_API_PORT:-$(env_get "$env_file" "WEB_API_PORT" "8080")}"
+  TELEGRAM_BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-$(env_get "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "")}"
+  if [[ -z "$CABINET_DOMAIN" ]]; then
+    CABINET_DOMAIN="$(normalize_domain_value "$(env_get "$env_file" "CABINET_URL" "")")"
+  fi
 }
 
 repair_bot_env_settings() {
@@ -997,6 +1053,632 @@ repair_installation() {
   exit 0
 }
 
+configure_email_auth_settings() {
+  local env_file="$1"
+  local enable_email verify_email
+  local current_enable current_verify
+
+  current_enable="$(env_get "$env_file" "CABINET_EMAIL_AUTH_ENABLED" "false")"
+  current_verify="$(env_get "$env_file" "CABINET_EMAIL_VERIFICATION_ENABLED" "false")"
+
+  echo -e "\n${BLUE}--- Настройка Email-авторизации ---${NC}"
+  echo "Где взять SMTP данные:"
+  echo "  - Yandex: Yandex 360 -> Пароль приложения"
+  echo "  - Gmail: Google Account -> App Passwords"
+  echo "  - Свой сервер: SMTP_HOST=localhost и SMTP_PORT=25"
+  ask_yes_no enable_email "Включить вход по email в кабинете?" "$current_enable"
+  env_set "$env_file" "CABINET_EMAIL_AUTH_ENABLED" "$enable_email"
+
+  if is_true "$enable_email"; then
+    ask SMTP_HOST "SMTP_HOST (пример: smtp.yandex.ru / smtp.gmail.com / localhost)" "$(env_get "$env_file" "SMTP_HOST" "$SMTP_HOST")"
+    ask SMTP_PORT "SMTP_PORT (обычно 587, 465 или 25)" "$(env_get "$env_file" "SMTP_PORT" "$SMTP_PORT")"
+    ask_optional SMTP_USER "SMTP_USER (обычно email, для localhost можно пусто)" "$(env_get "$env_file" "SMTP_USER" "$SMTP_USER")"
+    ask_optional SMTP_PASSWORD "SMTP_PASSWORD (пароль приложения/SMTP, можно вставить сразу)" "$(env_get "$env_file" "SMTP_PASSWORD" "$SMTP_PASSWORD")"
+    ask SMTP_FROM_EMAIL "SMTP_FROM_EMAIL (адрес отправителя)" "$(env_get "$env_file" "SMTP_FROM_EMAIL" "${SMTP_USER:-}")"
+    ask_optional SMTP_FROM_NAME "SMTP_FROM_NAME (имя отправителя)" "$(env_get "$env_file" "SMTP_FROM_NAME" "$SMTP_FROM_NAME")"
+    ask_yes_no SMTP_USE_TLS "Использовать TLS (SMTP_USE_TLS)?" "$(env_get "$env_file" "SMTP_USE_TLS" "$SMTP_USE_TLS")"
+    ask_yes_no verify_email "Требовать подтверждение email при регистрации?" "$current_verify"
+
+    env_set "$env_file" "SMTP_HOST" "$SMTP_HOST"
+    env_set "$env_file" "SMTP_PORT" "$SMTP_PORT"
+    env_set "$env_file" "SMTP_USER" "$SMTP_USER"
+    env_set "$env_file" "SMTP_PASSWORD" "$SMTP_PASSWORD"
+    env_set "$env_file" "SMTP_FROM_EMAIL" "$SMTP_FROM_EMAIL"
+    env_set "$env_file" "SMTP_FROM_NAME" "$SMTP_FROM_NAME"
+    env_set "$env_file" "SMTP_USE_TLS" "$SMTP_USE_TLS"
+    env_set "$env_file" "CABINET_EMAIL_VERIFICATION_ENABLED" "$verify_email"
+  else
+    env_set "$env_file" "CABINET_EMAIL_VERIFICATION_ENABLED" "false"
+    log_i "Email-вход выключен. Останется вход через Telegram/OAuth."
+  fi
+}
+
+configure_telegram_oidc_settings() {
+  local env_file="$1"
+  local enabled
+  local default_bot_id
+  local current_enabled current_client_id current_client_secret
+
+  current_enabled="$(env_get "$env_file" "TELEGRAM_OIDC_ENABLED" "false")"
+  current_client_id="$(env_get "$env_file" "TELEGRAM_OIDC_CLIENT_ID" "")"
+  current_client_secret="$(env_get "$env_file" "TELEGRAM_OIDC_CLIENT_SECRET" "")"
+  default_bot_id=""
+  [[ -n "$BOT_TOKEN" ]] && default_bot_id="${BOT_TOKEN%%:*}"
+
+  echo -e "\n${BLUE}--- Настройка Telegram OIDC ---${NC}"
+  echo "Где взять данные:"
+  echo "  1) @BotFather -> ваш бот -> Bot Settings -> Web Login"
+  echo "  2) Добавьте Allowed URL: https://${CABINET_DOMAIN}"
+  echo "  3) Возьмите Client ID и Client Secret"
+  ask_yes_no enabled "Включить Telegram OIDC вход?" "$current_enabled"
+  env_set "$env_file" "TELEGRAM_OIDC_ENABLED" "$enabled"
+
+  if is_true "$enabled"; then
+    ask TELEGRAM_OIDC_CLIENT_ID "TELEGRAM_OIDC_CLIENT_ID (обычно числовой ID бота)" "${current_client_id:-$default_bot_id}"
+    ask_optional TELEGRAM_OIDC_CLIENT_SECRET "TELEGRAM_OIDC_CLIENT_SECRET" "$current_client_secret"
+    env_set "$env_file" "TELEGRAM_OIDC_CLIENT_ID" "$TELEGRAM_OIDC_CLIENT_ID"
+    env_set "$env_file" "TELEGRAM_OIDC_CLIENT_SECRET" "$TELEGRAM_OIDC_CLIENT_SECRET"
+  fi
+}
+
+configure_single_oauth_provider() {
+  local env_file="$1"
+  local title="$2"
+  local enabled_key="$3"
+  local client_id_key="$4"
+  local client_secret_key="$5"
+  local doc_hint="$6"
+  local enabled client_id client_secret
+
+  enabled="$(env_get "$env_file" "$enabled_key" "false")"
+  client_id="$(env_get "$env_file" "$client_id_key" "")"
+  client_secret="$(env_get "$env_file" "$client_secret_key" "")"
+
+  echo -e "\n${BLUE}${title}${NC}"
+  echo "Подсказка: создайте OAuth приложение у провайдера."
+  echo "Redirect URI (для всех OAuth): https://${CABINET_DOMAIN}/auth/oauth/callback"
+  [[ -n "$doc_hint" ]] && echo "Где смотреть: $doc_hint"
+
+  ask_yes_no enabled "Включить ${title}?" "$enabled"
+  env_set "$env_file" "$enabled_key" "$enabled"
+  if is_true "$enabled"; then
+    ask "$client_id_key" "$client_id_key" "$client_id"
+    ask_optional "$client_secret_key" "$client_secret_key" "$client_secret"
+    eval "client_id=\${$client_id_key}"
+    eval "client_secret=\${$client_secret_key}"
+    env_set "$env_file" "$client_id_key" "$client_id"
+    env_set "$env_file" "$client_secret_key" "$client_secret"
+  fi
+}
+
+configure_oauth_settings() {
+  local env_file="$1"
+  echo -e "\n${BLUE}--- Настройка OAuth провайдеров ---${NC}"
+  echo "По официальной документации Redirect URI у всех провайдеров один:"
+  echo "  https://${CABINET_DOMAIN}/auth/oauth/callback"
+  echo "После изменения .env нужно перезапустить бот."
+
+  configure_single_oauth_provider "$env_file" "Google OAuth" "OAUTH_GOOGLE_ENABLED" "OAUTH_GOOGLE_CLIENT_ID" "OAUTH_GOOGLE_CLIENT_SECRET" "Google Cloud Console -> APIs & Services -> Credentials"
+  configure_single_oauth_provider "$env_file" "Yandex OAuth" "OAUTH_YANDEX_ENABLED" "OAUTH_YANDEX_CLIENT_ID" "OAUTH_YANDEX_CLIENT_SECRET" "Yandex OAuth -> Мои приложения"
+  configure_single_oauth_provider "$env_file" "Discord OAuth" "OAUTH_DISCORD_ENABLED" "OAUTH_DISCORD_CLIENT_ID" "OAUTH_DISCORD_CLIENT_SECRET" "Discord Developer Portal -> OAuth2"
+  configure_single_oauth_provider "$env_file" "VK OAuth" "OAUTH_VK_ENABLED" "OAUTH_VK_CLIENT_ID" "OAUTH_VK_CLIENT_SECRET" "VK ID -> Настройки приложения"
+}
+
+configure_admin_notifications_settings() {
+  local env_file="$1"
+  local enabled
+  local chat_id topic_id
+
+  chat_id="$(env_get "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" "$ADMIN_NOTIFICATIONS_CHAT_ID")"
+  topic_id="$(env_get "$env_file" "ADMIN_NOTIFICATIONS_TOPIC_ID" "$ADMIN_NOTIFICATIONS_TOPIC_ID")"
+  enabled="$(env_get "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "false")"
+
+  echo -e "\n${BLUE}--- Настройка админ-уведомлений ---${NC}"
+  echo "Как получить CHAT_ID:"
+  echo "  1) Создайте группу/канал, добавьте туда бота админом."
+  echo "  2) Перешлите сообщение из группы в @userinfobot и возьмите id."
+  ask_yes_no enabled "Включить админ-уведомления?" "$enabled"
+  if is_true "$enabled"; then
+    while true; do
+      ask ADMIN_NOTIFICATIONS_CHAT_ID "ADMIN_NOTIFICATIONS_CHAT_ID (пример: -1001234567890)" "$chat_id"
+      validate_chat_id "$ADMIN_NOTIFICATIONS_CHAT_ID" && break
+    done
+    ask_optional ADMIN_NOTIFICATIONS_TOPIC_ID "ADMIN_NOTIFICATIONS_TOPIC_ID (опционально для форума)" "$topic_id"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "true"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+    env_set "$env_file" "ADMIN_REPORTS_CHAT_ID" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_TOPIC_ID" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
+    env_set "$env_file" "ADMIN_REPORTS_TOPIC_ID" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
+  else
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "false"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" ""
+    env_set "$env_file" "ADMIN_REPORTS_CHAT_ID" ""
+  fi
+}
+
+configure_cabinet_core_settings() {
+  local env_file="$1"
+  local cabinet_url_from_env
+
+  cabinet_url_from_env="$(env_get "$env_file" "CABINET_URL" "")"
+  if [[ -z "$CABINET_DOMAIN" && -n "$cabinet_url_from_env" ]]; then
+    CABINET_DOMAIN="$(normalize_domain_value "$cabinet_url_from_env")"
+  fi
+
+  echo -e "\n${BLUE}--- Базовая настройка кабинета ---${NC}"
+  echo "Для Telegram Login обязателен домен и HTTPS (IP не подойдет)."
+  ask CABINET_DOMAIN "Домен кабинета (например: cabinet.example.com)" "${CABINET_DOMAIN:-}"
+  CABINET_DOMAIN="$(normalize_domain_value "$CABINET_DOMAIN")"
+
+  BOT_TOKEN="${BOT_TOKEN:-$(env_get "$env_file" "BOT_TOKEN" "")}"
+  TELEGRAM_BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-$(env_get "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "")}"
+  if [[ -z "$TELEGRAM_BOT_USERNAME" && -n "$BOT_TOKEN" ]]; then
+    TELEGRAM_BOT_USERNAME="$(autodetect_bot_username "$BOT_TOKEN")"
+  fi
+  ask_optional TELEGRAM_BOT_USERNAME "Username бота без @ (для кнопки Telegram входа)" "$TELEGRAM_BOT_USERNAME"
+
+  BOT_API_PORT="${BOT_API_PORT:-$(env_get "$env_file" "WEB_API_PORT" "8080")}"
+  ask BOT_API_PORT "Порт API бота (WEB_API_PORT)" "$BOT_API_PORT"
+
+  repair_bot_env_settings "$env_file"
+  log_ok "Базовые параметры кабинета и Telegram-входа обновлены."
+}
+
+run_configuration_diagnostics() {
+  local env_file="$1"
+  local auto_fix="${2:-false}"
+  local issues=0
+  local warnings=0
+  local fixed=0
+  local cabinet_url cabinet_origin cabinet_enabled
+  local telegram_user main_menu_mode
+  local email_enabled smtp_host smtp_from
+  local oidc_enabled oidc_id oidc_secret
+  local oauth_google oauth_yandex oauth_discord oauth_vk
+  local admin_notif chat_id
+  local http_code="n/a"
+
+  echo -e "\n${BLUE}--- Диагностика конфигурации (по docs.bedolagam.ru) ---${NC}"
+  cabinet_url="$(env_get "$env_file" "CABINET_URL" "")"
+  cabinet_enabled="$(env_get "$env_file" "CABINET_ENABLED" "false")"
+  telegram_user="$(env_get "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "")"
+  main_menu_mode="$(env_get "$env_file" "MAIN_MENU_MODE" "default")"
+
+  if ! is_true "$cabinet_enabled"; then
+    log_w "CABINET_ENABLED=false. Кабинет API может быть недоступен."
+    ((warnings++))
+    if is_true "$auto_fix"; then
+      env_set "$env_file" "CABINET_ENABLED" "true"
+      log_ok "AUTO-FIX: CABINET_ENABLED=true"
+      ((fixed++))
+    fi
+  else
+    log_ok "CABINET_ENABLED=true"
+  fi
+
+  if [[ -z "$cabinet_url" ]]; then
+    log_e "CABINET_URL пустой."
+    ((issues++))
+    if is_true "$auto_fix" && [[ -n "$CABINET_DOMAIN" ]]; then
+      env_set "$env_file" "CABINET_URL" "$(cabinet_base_url "$CABINET_DOMAIN")"
+      cabinet_url="$(env_get "$env_file" "CABINET_URL" "")"
+      log_ok "AUTO-FIX: CABINET_URL=${cabinet_url}"
+      ((fixed++))
+      ((issues--))
+    fi
+  elif [[ ! "$cabinet_url" =~ ^https:// ]]; then
+    log_w "CABINET_URL не на https (${cabinet_url}). Telegram/OAuth могут не работать."
+    ((warnings++))
+    if is_true "$auto_fix"; then
+      local host_from_url
+      host_from_url="$(normalize_domain_value "$cabinet_url")"
+      if is_domain_like "$host_from_url"; then
+        env_set "$env_file" "CABINET_URL" "https://${host_from_url}"
+        cabinet_url="$(env_get "$env_file" "CABINET_URL" "")"
+        log_ok "AUTO-FIX: CABINET_URL=${cabinet_url}"
+        ((fixed++))
+      fi
+    fi
+  else
+    log_ok "CABINET_URL=${cabinet_url}"
+  fi
+
+  if [[ -z "$telegram_user" ]]; then
+    log_w "CABINET_TELEGRAM_BOT_USERNAME не задан."
+    ((warnings++))
+    if is_true "$auto_fix" && [[ -n "$BOT_TOKEN" ]]; then
+      telegram_user="$(autodetect_bot_username "$BOT_TOKEN")"
+      if [[ -n "$telegram_user" ]]; then
+        env_set "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "$telegram_user"
+        log_ok "AUTO-FIX: CABINET_TELEGRAM_BOT_USERNAME=${telegram_user}"
+        ((fixed++))
+      fi
+    fi
+  else
+    log_ok "CABINET_TELEGRAM_BOT_USERNAME=${telegram_user}"
+  fi
+
+  if [[ "$main_menu_mode" != "cabinet" ]]; then
+    log_w "MAIN_MENU_MODE=${main_menu_mode}. Для упора на веб-кабинет обычно ставят cabinet."
+    ((warnings++))
+    if is_true "$auto_fix"; then
+      env_set "$env_file" "MAIN_MENU_MODE" "cabinet"
+      log_ok "AUTO-FIX: MAIN_MENU_MODE=cabinet"
+      ((fixed++))
+    fi
+  else
+    log_ok "MAIN_MENU_MODE=cabinet"
+  fi
+
+  cabinet_origin=""
+  if [[ -n "$cabinet_url" ]]; then
+    cabinet_origin="${cabinet_url%/}"
+  fi
+
+  if [[ -n "$cabinet_origin" ]]; then
+    if [[ "$(env_get "$env_file" "CABINET_ALLOWED_ORIGINS" "")" == *"$cabinet_origin"* ]]; then
+      log_ok "CABINET_ALLOWED_ORIGINS содержит ${cabinet_origin}"
+    else
+      log_w "CABINET_ALLOWED_ORIGINS не содержит ${cabinet_origin}"
+      ((warnings++))
+      if is_true "$auto_fix"; then
+        env_set "$env_file" "CABINET_ALLOWED_ORIGINS" "$cabinet_origin"
+        log_ok "AUTO-FIX: CABINET_ALLOWED_ORIGINS=${cabinet_origin}"
+        ((fixed++))
+      fi
+    fi
+    if [[ "$(env_get "$env_file" "WEB_API_ALLOWED_ORIGINS" "")" == *"$cabinet_origin"* ]]; then
+      log_ok "WEB_API_ALLOWED_ORIGINS содержит ${cabinet_origin}"
+    else
+      log_w "WEB_API_ALLOWED_ORIGINS не содержит ${cabinet_origin}"
+      ((warnings++))
+      if is_true "$auto_fix"; then
+        env_set "$env_file" "WEB_API_ALLOWED_ORIGINS" "$cabinet_origin"
+        log_ok "AUTO-FIX: WEB_API_ALLOWED_ORIGINS=${cabinet_origin}"
+        ((fixed++))
+      fi
+    fi
+  fi
+
+  email_enabled="$(env_get "$env_file" "CABINET_EMAIL_AUTH_ENABLED" "false")"
+  smtp_host="$(env_get "$env_file" "SMTP_HOST" "")"
+  smtp_from="$(env_get "$env_file" "SMTP_FROM_EMAIL" "")"
+  if is_true "$email_enabled"; then
+    if [[ -z "$smtp_host" || -z "$smtp_from" ]]; then
+      log_e "Email auth включен, но SMTP_HOST/SMTP_FROM_EMAIL не заполнены."
+      ((issues++))
+      if is_true "$auto_fix"; then
+        env_set "$env_file" "CABINET_EMAIL_AUTH_ENABLED" "false"
+        env_set "$env_file" "CABINET_EMAIL_VERIFICATION_ENABLED" "false"
+        log_ok "AUTO-FIX: Email auth отключен до заполнения SMTP."
+        ((fixed++))
+        ((issues--))
+      fi
+    else
+      log_ok "Email auth включен и SMTP базово заполнен."
+    fi
+  else
+    log_i "Email auth выключен (это нормально, если используете только Telegram/OAuth)."
+  fi
+
+  oidc_enabled="$(env_get "$env_file" "TELEGRAM_OIDC_ENABLED" "false")"
+  oidc_id="$(env_get "$env_file" "TELEGRAM_OIDC_CLIENT_ID" "")"
+  oidc_secret="$(env_get "$env_file" "TELEGRAM_OIDC_CLIENT_SECRET" "")"
+  if is_true "$oidc_enabled"; then
+    if [[ -z "$oidc_id" || -z "$oidc_secret" ]]; then
+      log_e "TELEGRAM_OIDC_ENABLED=true, но client_id/client_secret не заполнены."
+      ((issues++))
+      if is_true "$auto_fix"; then
+        env_set "$env_file" "TELEGRAM_OIDC_ENABLED" "false"
+        log_ok "AUTO-FIX: Telegram OIDC отключен до заполнения client_id/client_secret."
+        ((fixed++))
+        ((issues--))
+      fi
+    else
+      log_ok "Telegram OIDC включен и заполнен."
+    fi
+  fi
+
+  oauth_google="$(env_get "$env_file" "OAUTH_GOOGLE_ENABLED" "false")"
+  oauth_yandex="$(env_get "$env_file" "OAUTH_YANDEX_ENABLED" "false")"
+  oauth_discord="$(env_get "$env_file" "OAUTH_DISCORD_ENABLED" "false")"
+  oauth_vk="$(env_get "$env_file" "OAUTH_VK_ENABLED" "false")"
+
+  if is_true "$oauth_google" && { [[ -z "$(env_get "$env_file" "OAUTH_GOOGLE_CLIENT_ID" "")" ]] || [[ -z "$(env_get "$env_file" "OAUTH_GOOGLE_CLIENT_SECRET" "")" ]]; }; then
+    log_e "Google OAuth включен, но CLIENT_ID/SECRET не заполнены."
+    ((issues++))
+    if is_true "$auto_fix"; then
+      env_set "$env_file" "OAUTH_GOOGLE_ENABLED" "false"
+      log_ok "AUTO-FIX: Google OAuth отключен до заполнения ключей."
+      ((fixed++))
+      ((issues--))
+    fi
+  fi
+  if is_true "$oauth_yandex" && { [[ -z "$(env_get "$env_file" "OAUTH_YANDEX_CLIENT_ID" "")" ]] || [[ -z "$(env_get "$env_file" "OAUTH_YANDEX_CLIENT_SECRET" "")" ]]; }; then
+    log_e "Yandex OAuth включен, но CLIENT_ID/SECRET не заполнены."
+    ((issues++))
+    if is_true "$auto_fix"; then
+      env_set "$env_file" "OAUTH_YANDEX_ENABLED" "false"
+      log_ok "AUTO-FIX: Yandex OAuth отключен до заполнения ключей."
+      ((fixed++))
+      ((issues--))
+    fi
+  fi
+  if is_true "$oauth_discord" && { [[ -z "$(env_get "$env_file" "OAUTH_DISCORD_CLIENT_ID" "")" ]] || [[ -z "$(env_get "$env_file" "OAUTH_DISCORD_CLIENT_SECRET" "")" ]]; }; then
+    log_e "Discord OAuth включен, но CLIENT_ID/SECRET не заполнены."
+    ((issues++))
+    if is_true "$auto_fix"; then
+      env_set "$env_file" "OAUTH_DISCORD_ENABLED" "false"
+      log_ok "AUTO-FIX: Discord OAuth отключен до заполнения ключей."
+      ((fixed++))
+      ((issues--))
+    fi
+  fi
+  if is_true "$oauth_vk" && { [[ -z "$(env_get "$env_file" "OAUTH_VK_CLIENT_ID" "")" ]] || [[ -z "$(env_get "$env_file" "OAUTH_VK_CLIENT_SECRET" "")" ]]; }; then
+    log_e "VK OAuth включен, но CLIENT_ID/SECRET не заполнены."
+    ((issues++))
+    if is_true "$auto_fix"; then
+      env_set "$env_file" "OAUTH_VK_ENABLED" "false"
+      log_ok "AUTO-FIX: VK OAuth отключен до заполнения ключей."
+      ((fixed++))
+      ((issues--))
+    fi
+  fi
+
+  admin_notif="$(env_get "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "false")"
+  chat_id="$(env_get "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" "")"
+  if is_true "$admin_notif"; then
+    if ! validate_chat_id "$chat_id"; then
+      log_e "ADMIN_NOTIFICATIONS включены, но CHAT_ID невалидный."
+      ((issues++))
+      if is_true "$auto_fix"; then
+        env_set "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "false"
+        env_set "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" ""
+        env_set "$env_file" "ADMIN_REPORTS_CHAT_ID" ""
+        log_ok "AUTO-FIX: Админ-уведомления отключены из-за невалидного CHAT_ID."
+        ((fixed++))
+        ((issues--))
+      fi
+    else
+      log_ok "ADMIN_NOTIFICATIONS_CHAT_ID валиден."
+    fi
+  fi
+
+  if [[ -n "$cabinet_url" ]]; then
+    http_code="$(curl -k -sS -o /dev/null -w "%{http_code}" --max-time 8 "$cabinet_url" || true)"
+    if [[ "$http_code" =~ ^2|3 ]]; then
+      log_ok "HTTP проверка ${cabinet_url}: код ${http_code}"
+    else
+      log_w "HTTP проверка ${cabinet_url}: код ${http_code} (проверьте DNS/Nginx/SSL)"
+      ((warnings++))
+    fi
+  fi
+
+  echo
+  if [[ "$issues" -eq 0 ]]; then
+    log_ok "Критичных ошибок не найдено."
+  else
+    log_e "Найдено критичных проблем: ${issues}"
+  fi
+  if [[ "$warnings" -gt 0 ]]; then
+    log_w "Предупреждений: ${warnings}"
+  fi
+  if is_true "$auto_fix"; then
+    log_ok "AUTO-FIX: внесено правок: ${fixed}"
+  fi
+}
+
+run_settings_menu() {
+  local env_file="$BOT_DIR/.env"
+  local choice=""
+
+  if [[ ! -d "$BOT_DIR" ]]; then
+    log_e "Каталог бота не найден: $BOT_DIR"
+    log_e "Сначала установите бот (пункт 1 или 2 в главном меню)."
+    exit 1
+  fi
+
+  ensure_env "$BOT_DIR"
+  BOT_TOKEN="${BOT_TOKEN:-$(env_get "$env_file" "BOT_TOKEN" "")}"
+  BOT_API_PORT="${BOT_API_PORT:-$(env_get "$env_file" "WEB_API_PORT" "8080")}"
+
+  while true; do
+    echo
+    echo "Меню настроек:"
+    echo "  1) База кабинета (домен, CORS, username бота)"
+    echo "  2) Email-авторизация и SMTP"
+    echo "  3) Telegram OIDC (oauth.telegram.org)"
+    echo "  4) OAuth провайдеры (Google/Yandex/Discord/VK)"
+    echo "  5) Админ-уведомления (CHAT_ID/TOPIC_ID)"
+    echo "  6) Перенастроить Nginx/SSL для текущего домена"
+    echo "  7) Применить настройки и перезапустить бот"
+    echo "  8) Проверка настроек (диагностика)"
+    echo "  9) Назад в главное меню"
+    if [[ -t 0 ]]; then
+      read -r -p "Введите выбор [1-9]: " choice
+    else
+      read -r -p "Введите выбор [1-9]: " choice </dev/tty
+    fi
+
+    case "$choice" in
+      1) configure_cabinet_core_settings "$env_file" ;;
+      2) configure_email_auth_settings "$env_file" ;;
+      3) configure_telegram_oidc_settings "$env_file" ;;
+      4) configure_oauth_settings "$env_file" ;;
+      5) configure_admin_notifications_settings "$env_file" ;;
+      6)
+        if [[ -z "$CABINET_DOMAIN" ]]; then
+          CABINET_DOMAIN="$(normalize_domain_value "$(env_get "$env_file" "CABINET_URL" "")")"
+        fi
+        [[ -n "$CABINET_DOMAIN" ]] || ask CABINET_DOMAIN "Домен кабинета для SSL" ""
+        CABINET_DOMAIN="$(normalize_domain_value "$CABINET_DOMAIN")"
+        if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && is_domain_like "$CABINET_DOMAIN"; then
+          ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL" "$LETSENCRYPT_EMAIL"
+        fi
+        write_nginx_conf
+        setup_ssl
+        ;;
+      7)
+        compose "$BOT_DIR" up -d --build
+        compose "$BOT_DIR" ps || true
+        log_ok "Настройки применены. Бот перезапущен."
+        ;;
+      8)
+        run_configuration_diagnostics "$env_file"
+        ;;
+      9)
+        break
+        ;;
+      *)
+        log_w "Неверный выбор."
+        ;;
+    esac
+  done
+}
+
+get_repo_default_branch() {
+  local dir="$1"
+  if [[ -d "$dir/.git" ]]; then
+    git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true
+  fi
+}
+
+update_bot_code() {
+  local branch
+  branch="$(get_repo_default_branch "$BOT_DIR")"
+  [[ -n "$branch" ]] || branch="main"
+  log_i "Обновление бота из ветки ${branch}..."
+  git -C "$BOT_DIR" fetch --all --prune
+  git -C "$BOT_DIR" checkout "$branch"
+  git -C "$BOT_DIR" pull --ff-only origin "$branch"
+  compose "$BOT_DIR" up -d --build
+  log_ok "Бот обновлен и перезапущен."
+}
+
+update_bot_to_tag() {
+  local tag=""
+  if [[ -t 0 ]]; then
+    read -r -p "Введите тег версии бота (например v3.52.1): " tag
+  else
+    read -r -p "Введите тег версии бота (например v3.52.1): " tag </dev/tty
+  fi
+  [[ -n "$tag" ]] || {
+    log_w "Тег не указан."
+    return 0
+  }
+  log_i "Обновление бота до тега ${tag}..."
+  git -C "$BOT_DIR" fetch --tags --prune
+  git -C "$BOT_DIR" checkout "$tag"
+  compose "$BOT_DIR" up -d --build
+  log_ok "Бот переключен на ${tag} и перезапущен."
+}
+
+update_cabinet_static() {
+  log_i "Обновление кабинета..."
+  clone_or_update "$CABINET_REPO" "$CABINET_DIR" "Bedolaga Cabinet"
+  build_cabinet_static
+  write_nginx_conf
+  setup_ssl
+  log_ok "Кабинет обновлен."
+}
+
+show_versions_info() {
+  local bot_head bot_branch
+  bot_branch="$(git -C "$BOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "n/a")"
+  bot_head="$(git -C "$BOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "n/a")"
+  echo -e "\n${BLUE}--- Версии и состояние ---${NC}"
+  echo "Бот: branch=${bot_branch}, commit=${bot_head}"
+  compose "$BOT_DIR" ps || true
+}
+
+renew_ssl_now() {
+  log_i "Принудительное обновление сертификатов..."
+  $SUDO certbot renew || true
+  $SUDO nginx -t && $SUDO systemctl reload nginx
+  log_ok "Проверка/обновление SSL выполнена."
+}
+
+run_ops_menu() {
+  local env_file="$BOT_DIR/.env"
+  local choice=""
+  local answer=""
+
+  if [[ ! -d "$BOT_DIR" ]]; then
+    log_e "Каталог бота не найден: $BOT_DIR"
+    log_e "Сначала установите бот."
+    exit 1
+  fi
+  load_runtime_from_bot_env
+  ensure_env "$BOT_DIR"
+
+  while true; do
+    echo
+    echo "Меню обслуживания:"
+    echo "  1) Проверить конфигурацию (read-only)"
+    echo "  2) Авто-исправить конфигурацию (safe fix)"
+    echo "  3) Обновить Бот до latest (ветка по умолчанию)"
+    echo "  4) Обновить Бот до конкретного тега"
+    echo "  5) Обновить Кабинет (статический фронт)"
+    echo "  6) Полное обновление (бот + кабинет)"
+    echo "  7) Перезапустить бота"
+    echo "  8) Показать версии/статус"
+    echo "  9) Логи бота (tail 200)"
+    echo " 10) Обновить SSL сертификаты (certbot renew)"
+    echo " 11) Назад"
+    if [[ -t 0 ]]; then
+      read -r -p "Введите выбор [1-11]: " choice
+    else
+      read -r -p "Введите выбор [1-11]: " choice </dev/tty
+    fi
+
+    case "$choice" in
+      1)
+        run_configuration_diagnostics "$env_file" "false"
+        ;;
+      2)
+        run_configuration_diagnostics "$env_file" "true"
+        ask_yes_no restart_answer "Перезапустить бота для применения авто-фиксов?" "true"
+        if is_true "$restart_answer"; then
+          compose "$BOT_DIR" up -d --build
+          log_ok "Бот перезапущен."
+        fi
+        ;;
+      3)
+        update_bot_code
+        ;;
+      4)
+        update_bot_to_tag
+        ;;
+      5)
+        update_cabinet_static
+        ;;
+      6)
+        update_bot_code
+        update_cabinet_static
+        ;;
+      7)
+        compose "$BOT_DIR" up -d --build
+        log_ok "Бот перезапущен."
+        ;;
+      8)
+        show_versions_info
+        ;;
+      9)
+        compose "$BOT_DIR" logs --tail 200 bot || true
+        ;;
+      10)
+        renew_ssl_now
+        ;;
+      11)
+        break
+        ;;
+      *)
+        log_w "Неверный выбор."
+        ;;
+    esac
+  done
+}
+
 confirm_destructive() {
   local msg="$1"
   local answer=""
@@ -1054,6 +1736,16 @@ handle_remove_action() {
       ;;
     repair_install)
       repair_installation
+      ;;
+    settings_menu)
+      run_settings_menu
+      log_ok "Настройки завершены."
+      exit 0
+      ;;
+    ops_menu)
+      run_ops_menu
+      log_ok "Обслуживание завершено."
+      exit 0
       ;;
   esac
 }
