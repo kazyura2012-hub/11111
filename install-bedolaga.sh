@@ -48,7 +48,7 @@ SMTP_USER="${SMTP_USER:-}"
 SMTP_PASSWORD="${SMTP_PASSWORD:-}"
 SMTP_FROM_NAME="${SMTP_FROM_NAME:-Bedolaga Cabinet}"
 SMTP_FROM_EMAIL="${SMTP_FROM_EMAIL:-}"
-SMTP_TLS="${SMTP_TLS:-true}"
+SMTP_USE_TLS="${SMTP_USE_TLS:-true}"
 
 PRICE_30_DAYS="${PRICE_30_DAYS:-1000}"
 PRICE_90_DAYS="${PRICE_90_DAYS:-36900}"
@@ -453,7 +453,7 @@ configure_bot_env() {
   env_set "$env_file" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
   env_set_if_missing "$env_file" "POSTGRES_HOST" "db"
   env_set_if_missing "$env_file" "POSTGRES_PORT" "5432"
-  env_set_if_missing "$env_file" "POSTGRES_USER" "postgres"
+  env_set_if_missing "$env_file" "POSTGRES_USER" "remnawave_user"
   env_set_if_missing "$env_file" "POSTGRES_DB" "remnawave_bot"
   env_set "$env_file" "SALES_MODE" "tariffs"
   env_set "$env_file" "PRICE_30_DAYS" "$PRICE_30_DAYS"
@@ -467,7 +467,7 @@ configure_bot_env() {
   env_set "$env_file" "SMTP_PASSWORD" "$SMTP_PASSWORD"
   env_set "$env_file" "SMTP_FROM_NAME" "$SMTP_FROM_NAME"
   env_set "$env_file" "SMTP_FROM_EMAIL" "$SMTP_FROM_EMAIL"
-  env_set "$env_file" "SMTP_TLS" "$SMTP_TLS"
+  env_set "$env_file" "SMTP_USE_TLS" "$SMTP_USE_TLS"
 
   # Payment settings
   env_set "$env_file" "CRYPTOBOT_ENABLED" "$([[ -n "$CRYPTOBOT_API_TOKEN" ]] && echo "true" || echo "false")"
@@ -530,7 +530,7 @@ install_bot() {
   ensure_env "$BOT_DIR"
   configure_bot_env "$BOT_DIR/.env" "$(normalize_origin "$CABINET_DOMAIN")"
 
-  mkdir -p "$BOT_DIR/data/backups" "$BOT_DIR/logs" "$BOT_DIR/locales"
+  mkdir -p "$BOT_DIR/data/backups" "$BOT_DIR/data/referral_qr" "$BOT_DIR/logs" "$BOT_DIR/locales"
   $SUDO chown -R 1000:1000 "$BOT_DIR/data" "$BOT_DIR/logs" "$BOT_DIR/locales" 2>/dev/null || true
 
   compose "$BOT_DIR" down -t 10 || true
@@ -876,7 +876,7 @@ collect_inputs() {
       ask_secret SMTP_PASSWORD "SMTP Пароль (для Yandex/Gmail нужен 'Пароль приложения')"
       ask SMTP_FROM_EMAIL "Email отправителя (тот же что и пользователь)" "${SMTP_USER}"
       ask SMTP_FROM_NAME "Имя отправителя" "$SMTP_FROM_NAME"
-      ask SMTP_TLS "Использовать TLS/SSL? (true/false)" "$SMTP_TLS"
+      ask SMTP_USE_TLS "Использовать TLS/SSL? (true/false)" "$SMTP_USE_TLS"
     else
       log_w "SMTP не настроен. Регистрация в кабинете может не работать!"
     fi
