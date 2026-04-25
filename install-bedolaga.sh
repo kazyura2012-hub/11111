@@ -23,6 +23,8 @@ INSTALL_BOT="${INSTALL_BOT:-true}"
 INSTALL_CABINET="${INSTALL_CABINET:-true}"
 CONFIGURE_NGINX="${CONFIGURE_NGINX:-true}"
 ENABLE_SSL="${ENABLE_SSL:-true}"
+MINIMAL_MODE="${MINIMAL_MODE:-true}"
+SHOW_MENU="${SHOW_MENU:-false}"
 LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
 CABINET_DOMAIN="${CABINET_DOMAIN:-}"
 
@@ -61,7 +63,7 @@ YOOKASSA_SECRET_KEY="${YOOKASSA_SECRET_KEY:-}"
 VITE_APP_NAME="${VITE_APP_NAME:-Cabinet}"
 VITE_APP_LOGO="${VITE_APP_LOGO:-V}"
 BOT_API_PORT="${BOT_API_PORT:-8080}"
-CABINET_DEPLOY_MODE="${CABINET_DEPLOY_MODE:-image}" # image|source|auto
+CABINET_DEPLOY_MODE="${CABINET_DEPLOY_MODE:-auto}" # image|source|auto
 
 SUDO=""
 
@@ -225,6 +227,49 @@ validate_url() {
     return 1
   fi
   return 0
+}
+
+is_ipv4() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+is_domain_like() {
+  local v="${1#http://}"
+  v="${v#https://}"
+  v="${v%%/*}"
+  [[ -n "$v" ]] || return 1
+  is_ipv4 "$v" && return 1
+  [[ "$v" == "localhost" ]] && return 1
+  [[ "$v" == *.* ]]
+}
+
+normalize_domain_value() {
+  local v="$1"
+  v="${v#http://}"
+  v="${v#https://}"
+  v="${v%%/*}"
+  printf '%s' "$v"
+}
+
+cabinet_base_url() {
+  local host
+  host="$(normalize_domain_value "$1")"
+  [[ -n "$host" ]] || {
+    echo ""
+    return 0
+  }
+  if is_domain_like "$host"; then
+    echo "https://${host}"
+  else
+    echo "http://${host}"
+  fi
+}
+
+autodetect_bot_username() {
+  local token="$1"
+  [[ -n "$token" ]] || return 0
+  curl -fsS --max-time 10 "https://api.telegram.org/bot${token}/getMe" 2>/dev/null \
+    | jq -r '.result.username // empty' 2>/dev/null || true
 }
 
 auto_public_ip() {
@@ -442,6 +487,8 @@ check_remnawave() {
 
 configure_bot_env() {
   local env_file="$1" cabinet_origin="$2"
+  local cabinet_url="$3"
+  local smtp_ready="false"
 
   log_i "Configuring .env for Bot..."
   env_set "$env_file" "BOT_TOKEN" "$BOT_TOKEN"
@@ -468,6 +515,9 @@ configure_bot_env() {
   env_set "$env_file" "SMTP_FROM_NAME" "$SMTP_FROM_NAME"
   env_set "$env_file" "SMTP_FROM_EMAIL" "$SMTP_FROM_EMAIL"
   env_set "$env_file" "SMTP_USE_TLS" "$SMTP_USE_TLS"
+  if [[ -n "$SMTP_HOST" && -n "$SMTP_FROM_EMAIL" ]]; then
+    smtp_ready="true"
+  fi
 
   # Payment settings
   env_set "$env_file" "CRYPTOBOT_ENABLED" "$([[ -n "$CRYPTOBOT_API_TOKEN" ]] && echo "true" || echo "false")"
@@ -480,6 +530,9 @@ configure_bot_env() {
   env_set "$env_file" "WEB_API_ENABLED" "true"
   env_set "$env_file" "WEB_API_PORT" "$BOT_API_PORT"
   env_set "$env_file" "CABINET_ENABLED" "true"
+  env_set "$env_file" "CABINET_URL" "$cabinet_url"
+  env_set "$env_file" "CABINET_EMAIL_AUTH_ENABLED" "$smtp_ready"
+  env_set "$env_file" "CABINET_EMAIL_VERIFICATION_ENABLED" "$smtp_ready"
   env_set_if_missing "$env_file" "CABINET_JWT_SECRET" "$(openssl rand -hex 32)"
 
   if [[ -n "$cabinet_origin" ]]; then
@@ -528,7 +581,7 @@ install_bot() {
   log_i "Installing Bedolaga Bot..."
   clone_or_update "$BOT_REPO" "$BOT_DIR" "Bedolaga Bot"
   ensure_env "$BOT_DIR"
-  configure_bot_env "$BOT_DIR/.env" "$(normalize_origin "$CABINET_DOMAIN")"
+  configure_bot_env "$BOT_DIR/.env" "$(normalize_origin "$CABINET_DOMAIN")" "$(cabinet_base_url "$CABINET_DOMAIN")"
 
   mkdir -p "$BOT_DIR/data/backups" "$BOT_DIR/data/referral_qr" "$BOT_DIR/logs" "$BOT_DIR/locales"
   $SUDO chown -R 1000:1000 "$BOT_DIR/data" "$BOT_DIR/logs" "$BOT_DIR/locales" 2>/dev/null || true
@@ -819,7 +872,7 @@ collect_inputs() {
   local detected_ip
   detected_ip="$(auto_public_ip)"
 
-  if ! is_true "$NON_INTERACTIVE"; then
+  if ! is_true "$NON_INTERACTIVE" && is_true "$SHOW_MENU"; then
     show_menu
   fi
   handle_remove_action
@@ -831,7 +884,7 @@ collect_inputs() {
   fi
 
   if ! is_true "$INSTALL_BOT" && ! is_true "$INSTALL_CABINET" && is_true "$CONFIGURE_NGINX"; then
-    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]]; then
+    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$MINIMAL_MODE"; then
       ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
     fi
     validate_dns_for_domain "$detected_ip"
@@ -855,7 +908,13 @@ collect_inputs() {
       }
     done
 
-    ask TELEGRAM_BOT_USERNAME "Username бота без @" ""
+    if [[ -z "$TELEGRAM_BOT_USERNAME" ]]; then
+      TELEGRAM_BOT_USERNAME="$(autodetect_bot_username "$BOT_TOKEN")"
+      [[ -n "$TELEGRAM_BOT_USERNAME" ]] && log_ok "Автоопределен username бота: ${TELEGRAM_BOT_USERNAME}"
+    fi
+    if [[ -z "$TELEGRAM_BOT_USERNAME" && ! is_true "$MINIMAL_MODE" ]]; then
+      ask TELEGRAM_BOT_USERNAME "Username бота без @" ""
+    fi
 
     while true; do
       ask REMNAWAVE_API_URL "REMNAWAVE_API_URL (например: https://panel.example.com)" ""
@@ -865,44 +924,50 @@ collect_inputs() {
     done
 
     ask_secret REMNAWAVE_API_KEY "REMNAWAVE_API_KEY"
-    ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD (пароль для базы данных бота)"
+    if [[ -z "$POSTGRES_PASSWORD" ]]; then
+      POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+      log_ok "POSTGRES_PASSWORD сгенерирован автоматически."
+    fi
 
-    echo -e "\n${BLUE}--- Настройка Почты (SMTP) ---${NC}"
-    echo -e "${YELLOW}Необходимо для регистрации пользователей в кабинете.${NC}"
-    ask SMTP_HOST "SMTP Хост (например: smtp.yandex.ru или smtp.gmail.com)" "$SMTP_HOST"
-    if [[ -n "$SMTP_HOST" ]]; then
-      ask SMTP_PORT "SMTP Порт (обычно 465 или 587)" "$SMTP_PORT"
-      ask SMTP_USER "SMTP Пользователь (обычно ваш email)" "$SMTP_USER"
-      ask_secret SMTP_PASSWORD "SMTP Пароль (для Yandex/Gmail нужен 'Пароль приложения')"
-      ask SMTP_FROM_EMAIL "Email отправителя (тот же что и пользователь)" "${SMTP_USER}"
-      ask SMTP_FROM_NAME "Имя отправителя" "$SMTP_FROM_NAME"
-      ask SMTP_USE_TLS "Использовать TLS/SSL? (true/false)" "$SMTP_USE_TLS"
+    if ! is_true "$MINIMAL_MODE"; then
+      ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD (пароль для базы данных бота)"
+      echo -e "\n${BLUE}--- Настройка Почты (SMTP) ---${NC}"
+      echo -e "${YELLOW}Необходимо для регистрации пользователей в кабинете.${NC}"
+      ask SMTP_HOST "SMTP Хост (например: smtp.yandex.ru или smtp.gmail.com)" "$SMTP_HOST"
+      if [[ -n "$SMTP_HOST" ]]; then
+        ask SMTP_PORT "SMTP Порт (обычно 465 или 587)" "$SMTP_PORT"
+        ask SMTP_USER "SMTP Пользователь (обычно ваш email)" "$SMTP_USER"
+        ask_secret SMTP_PASSWORD "SMTP Пароль (для Yandex/Gmail нужен 'Пароль приложения')"
+        ask SMTP_FROM_EMAIL "Email отправителя (тот же что и пользователь)" "${SMTP_USER}"
+        ask SMTP_FROM_NAME "Имя отправителя" "$SMTP_FROM_NAME"
+        ask SMTP_USE_TLS "Использовать TLS/SSL? (true/false)" "$SMTP_USE_TLS"
+      fi
+
+      echo -e "\n${BLUE}--- Поддержка и Цены ---${NC}"
+      ask SUPPORT_USERNAME "Username поддержки в Telegram (например: @support_bot)" "$SUPPORT_USERNAME"
+      ask PRICE_30_DAYS "Цена за 30 дней (в копейках, например: 10000 = 100 руб)" "$PRICE_30_DAYS"
+      ask PRICE_90_DAYS "Цена за 90 дней (в копейках)" "$PRICE_90_DAYS"
+      ask PRICE_180_DAYS "Цена за 180 дней (в копейках)" "$PRICE_180_DAYS"
+
+      echo -e "\n${BLUE}--- Платежные системы (Опционально) ---${NC}"
+      echo -e "${YELLOW}Подсказка: Можно пропустить сейчас и добавить позже в .env${NC}"
+      ask CRYPTOBOT_API_TOKEN "CryptoBot API Token (нажмите ENTER чтобы пропустить)" ""
+      ask YOOKASSA_SHOP_ID "YooKassa Shop ID (нажмите ENTER чтобы пропустить)" ""
+      if [[ -n "$YOOKASSA_SHOP_ID" ]]; then
+        ask_secret YOOKASSA_SECRET_KEY "YooKassa Secret Key"
+      fi
+
+      ask BOT_API_PORT "Внутренний порт API бота (для связи с кабинетом)" "$BOT_API_PORT"
     else
-      log_w "SMTP не настроен. Регистрация в кабинете может не работать!"
+      log_i "MINIMAL_MODE=true: SMTP, цены и платёжки оставлены со значениями по умолчанию."
     fi
-
-    echo -e "\n${BLUE}--- Поддержка и Цены ---${NC}"
-    ask SUPPORT_USERNAME "Username поддержки в Telegram (например: @support_bot)" "$SUPPORT_USERNAME"
-    ask PRICE_30_DAYS "Цена за 30 дней (в копейках, например: 10000 = 100 руб)" "$PRICE_30_DAYS"
-    ask PRICE_90_DAYS "Цена за 90 дней (в копейках)" "$PRICE_90_DAYS"
-    ask PRICE_180_DAYS "Цена за 180 дней (в копейках)" "$PRICE_180_DAYS"
-
-    echo -e "\n${BLUE}--- Платежные системы (Опционально) ---${NC}"
-    echo -e "${YELLOW}Подсказка: Можно пропустить сейчас и добавить позже в .env${NC}"
-    ask CRYPTOBOT_API_TOKEN "CryptoBot API Token (нажмите ENTER чтобы пропустить)" ""
-    ask YOOKASSA_SHOP_ID "YooKassa Shop ID (нажмите ENTER чтобы пропустить)" ""
-    if [[ -n "$YOOKASSA_SHOP_ID" ]]; then
-      ask_secret YOOKASSA_SECRET_KEY "YooKassa Secret Key"
-    fi
-
-    ask BOT_API_PORT "Внутренний порт API бота (для связи с кабинетом)" "$BOT_API_PORT"
   fi
 
   # 3. Cabinet Configuration
   if is_true "$INSTALL_CABINET" || is_true "$CONFIGURE_NGINX"; then
     echo -e "\n${BLUE}--- Конфигурация Кабинета ---${NC}"
     
-    if is_true "$INSTALL_CABINET"; then
+    if is_true "$INSTALL_CABINET" && ! is_true "$MINIMAL_MODE"; then
       ask VITE_APP_NAME "Название приложения в кабинете" "$VITE_APP_NAME"
       ask VITE_APP_LOGO "Текст логотипа (обычно 1 буква)" "$VITE_APP_LOGO"
       
@@ -918,9 +983,14 @@ collect_inputs() {
       fi
     fi
 
-    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE"; then
+    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE" && ! is_true "$MINIMAL_MODE"; then
       echo -e ""
       ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
+    fi
+
+    if is_true "$ENABLE_SSL" && ! is_domain_like "$CABINET_DOMAIN"; then
+      log_w "SSL отключен автоматически: для IP/localhost Let's Encrypt не применяется."
+      ENABLE_SSL="false"
     fi
   fi
 
