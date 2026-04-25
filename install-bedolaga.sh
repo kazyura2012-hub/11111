@@ -154,11 +154,12 @@ show_menu() {
 ask() {
   local var_name="$1"
   local prompt="$2"
-  local default="${3:-${!var_name}}"
+  local current_value="${!var_name-}"
+  local default="${3:-$current_value}"
   local value
 
   if is_true "$NON_INTERACTIVE"; then
-    if [[ -n "${!var_name}" ]]; then
+    if [[ -n "${!var_name-}" ]]; then
       return 0
     fi
     if [[ -n "$default" ]]; then
@@ -190,7 +191,7 @@ ask_secret() {
   local prompt="$2"
   local value
 
-  if [[ -n "${!var_name}" ]]; then
+  if [[ -n "${!var_name-}" ]]; then
     return 0
   fi
   if is_true "$NON_INTERACTIVE"; then
@@ -213,11 +214,12 @@ ask_secret() {
 ask_optional() {
   local var_name="$1"
   local prompt="$2"
-  local default="${3:-${!var_name}}"
+  local current_value="${!var_name-}"
+  local default="${3:-$current_value}"
   local value
 
   if is_true "$NON_INTERACTIVE"; then
-    if [[ -n "${!var_name}" ]]; then
+    if [[ -n "${!var_name-}" ]]; then
       return 0
     fi
     printf -v "$var_name" '%s' "$default"
@@ -240,6 +242,35 @@ ask_optional() {
   printf -v "$var_name" '%s' "$value"
 }
 
+ask_optional_secret() {
+  local var_name="$1"
+  local prompt="$2"
+  local current_value="${!var_name-}"
+  local default="${3:-$current_value}"
+  local value
+
+  if is_true "$NON_INTERACTIVE"; then
+    if [[ -n "${!var_name-}" ]]; then
+      return 0
+    fi
+    printf -v "$var_name" '%s' "$default"
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    read -r -s -p "$prompt (можно Enter чтобы оставить как есть): " value
+  elif [[ -r /dev/tty ]]; then
+    read -r -s -p "$prompt (можно Enter чтобы оставить как есть): " value </dev/tty
+  else
+    log_e "Интерактивный ввод недоступен. Используйте NON_INTERACTIVE=true."
+    exit 1
+  fi
+  echo
+
+  value="${value:-$default}"
+  printf -v "$var_name" '%s' "$value"
+}
+
 ask_yes_no() {
   local var_name="$1"
   local prompt="$2"
@@ -249,7 +280,7 @@ ask_yes_no() {
   is_true "$default" && suffix="[Y/n]"
 
   if is_true "$NON_INTERACTIVE"; then
-    if [[ -n "${!var_name}" ]]; then
+    if [[ -n "${!var_name-}" ]]; then
       return 0
     fi
     printf -v "$var_name" '%s' "$default"
@@ -583,7 +614,7 @@ repair_bot_env_settings() {
 
   ensure_env "$BOT_DIR"
   env_set "$env_file" "WEB_API_ENABLED" "true"
-  env_set_if_missing "$env_file" "WEB_API_PORT" "$BOT_API_PORT"
+  env_set "$env_file" "WEB_API_PORT" "$BOT_API_PORT"
   env_set "$env_file" "CABINET_ENABLED" "true"
   env_set "$env_file" "CABINET_URL" "$cabinet_url"
   env_set "$env_file" "MAIN_MENU_MODE" "cabinet"
@@ -1073,7 +1104,7 @@ configure_email_auth_settings() {
     ask SMTP_HOST "SMTP_HOST (пример: smtp.yandex.ru / smtp.gmail.com / localhost)" "$(env_get "$env_file" "SMTP_HOST" "$SMTP_HOST")"
     ask SMTP_PORT "SMTP_PORT (обычно 587, 465 или 25)" "$(env_get "$env_file" "SMTP_PORT" "$SMTP_PORT")"
     ask_optional SMTP_USER "SMTP_USER (обычно email, для localhost можно пусто)" "$(env_get "$env_file" "SMTP_USER" "$SMTP_USER")"
-    ask_optional SMTP_PASSWORD "SMTP_PASSWORD (пароль приложения/SMTP, можно вставить сразу)" "$(env_get "$env_file" "SMTP_PASSWORD" "$SMTP_PASSWORD")"
+    ask_optional_secret SMTP_PASSWORD "SMTP_PASSWORD (пароль приложения/SMTP)" "$(env_get "$env_file" "SMTP_PASSWORD" "$SMTP_PASSWORD")"
     ask SMTP_FROM_EMAIL "SMTP_FROM_EMAIL (адрес отправителя)" "$(env_get "$env_file" "SMTP_FROM_EMAIL" "${SMTP_USER:-}")"
     ask_optional SMTP_FROM_NAME "SMTP_FROM_NAME (имя отправителя)" "$(env_get "$env_file" "SMTP_FROM_NAME" "$SMTP_FROM_NAME")"
     ask_yes_no SMTP_USE_TLS "Использовать TLS (SMTP_USE_TLS)?" "$(env_get "$env_file" "SMTP_USE_TLS" "$SMTP_USE_TLS")"
@@ -1115,7 +1146,7 @@ configure_telegram_oidc_settings() {
 
   if is_true "$enabled"; then
     ask TELEGRAM_OIDC_CLIENT_ID "TELEGRAM_OIDC_CLIENT_ID (обычно числовой ID бота)" "${current_client_id:-$default_bot_id}"
-    ask_optional TELEGRAM_OIDC_CLIENT_SECRET "TELEGRAM_OIDC_CLIENT_SECRET" "$current_client_secret"
+    ask_optional_secret TELEGRAM_OIDC_CLIENT_SECRET "TELEGRAM_OIDC_CLIENT_SECRET" "$current_client_secret"
     env_set "$env_file" "TELEGRAM_OIDC_CLIENT_ID" "$TELEGRAM_OIDC_CLIENT_ID"
     env_set "$env_file" "TELEGRAM_OIDC_CLIENT_SECRET" "$TELEGRAM_OIDC_CLIENT_SECRET"
   fi
@@ -1143,7 +1174,7 @@ configure_single_oauth_provider() {
   env_set "$env_file" "$enabled_key" "$enabled"
   if is_true "$enabled"; then
     ask "$client_id_key" "$client_id_key" "$client_id"
-    ask_optional "$client_secret_key" "$client_secret_key" "$client_secret"
+    ask_optional_secret "$client_secret_key" "$client_secret_key" "$client_secret"
     eval "client_id=\${$client_id_key}"
     eval "client_secret=\${$client_secret_key}"
     env_set "$env_file" "$client_id_key" "$client_id"
@@ -1153,6 +1184,14 @@ configure_single_oauth_provider() {
 
 configure_oauth_settings() {
   local env_file="$1"
+  if [[ -z "$CABINET_DOMAIN" ]]; then
+    CABINET_DOMAIN="$(normalize_domain_value "$(env_get "$env_file" "CABINET_URL" "")")"
+  fi
+  if [[ -z "$CABINET_DOMAIN" ]]; then
+    ask CABINET_DOMAIN "Домен кабинета для OAuth Redirect URI (пример: cabinet.example.com)" ""
+  fi
+  CABINET_DOMAIN="$(normalize_domain_value "$CABINET_DOMAIN")"
+
   echo -e "\n${BLUE}--- Настройка OAuth провайдеров ---${NC}"
   echo "По официальной документации Redirect URI у всех провайдеров один:"
   echo "  https://${CABINET_DOMAIN}/auth/oauth/callback"
