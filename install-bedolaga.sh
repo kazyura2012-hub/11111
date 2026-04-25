@@ -912,7 +912,7 @@ collect_inputs() {
       TELEGRAM_BOT_USERNAME="$(autodetect_bot_username "$BOT_TOKEN")"
       [[ -n "$TELEGRAM_BOT_USERNAME" ]] && log_ok "Автоопределен username бота: ${TELEGRAM_BOT_USERNAME}"
     fi
-    if [[ -z "$TELEGRAM_BOT_USERNAME" && ! is_true "$MINIMAL_MODE" ]]; then
+    if [[ -z "$TELEGRAM_BOT_USERNAME" ]] && ! is_true "$MINIMAL_MODE"; then
       ask TELEGRAM_BOT_USERNAME "Username бота без @" ""
     fi
 
