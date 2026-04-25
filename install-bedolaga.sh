@@ -24,7 +24,7 @@ INSTALL_CABINET="${INSTALL_CABINET:-true}"
 CONFIGURE_NGINX="${CONFIGURE_NGINX:-true}"
 ENABLE_SSL="${ENABLE_SSL:-true}"
 MINIMAL_MODE="${MINIMAL_MODE:-true}"
-SHOW_MENU="${SHOW_MENU:-false}"
+SHOW_MENU="${SHOW_MENU:-true}"
 LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
 CABINET_DOMAIN="${CABINET_DOMAIN:-}"
 
@@ -38,6 +38,8 @@ BOT_TOKEN="${BOT_TOKEN:-}"
 ADMIN_IDS="${ADMIN_IDS:-}"
 SUPPORT_USERNAME="${SUPPORT_USERNAME:-@support}"
 TELEGRAM_BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-}"
+ADMIN_NOTIFICATIONS_CHAT_ID="${ADMIN_NOTIFICATIONS_CHAT_ID:-}"
+ADMIN_NOTIFICATIONS_TOPIC_ID="${ADMIN_NOTIFICATIONS_TOPIC_ID:-}"
 
 REMNAWAVE_API_URL="${REMNAWAVE_API_URL:-}"
 REMNAWAVE_API_KEY="${REMNAWAVE_API_KEY:-}"
@@ -124,11 +126,12 @@ show_menu() {
   echo "  5) Удалить только Бот"
   echo "  6) Удалить только Кабинет"
   echo "  7) Полное удаление (Бот + Кабинет)"
-  echo "  8) Выход"
+  echo "  8) Режим ремонта (починить домен/SSL/вход/уведомления)"
+  echo "  9) Выход"
   if [[ -t 0 ]]; then
-    read -r -p "Введите выбор [1-8]: " choice
+    read -r -p "Введите выбор [1-9]: " choice
   else
-    read -r -p "Введите выбор [1-8]: " choice </dev/tty
+    read -r -p "Введите выбор [1-9]: " choice </dev/tty
   fi
   case "$choice" in
     1) INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
@@ -138,7 +141,8 @@ show_menu() {
     5) ACTION="remove_bot" ;;
     6) ACTION="remove_cabinet" ;;
     7) ACTION="remove_all" ;;
-    8) log_i "Выход."; exit 0 ;;
+    8) ACTION="repair_install" ;;
+    9) log_i "Выход."; exit 0 ;;
     *) log_w "Неверный выбор, используем вариант 1."; INSTALL_BOT="true"; INSTALL_CABINET="true"; CONFIGURE_NGINX="true" ;;
   esac
 }
@@ -202,6 +206,36 @@ ask_secret() {
   printf -v "$var_name" '%s' "$value"
 }
 
+ask_optional() {
+  local var_name="$1"
+  local prompt="$2"
+  local default="${3:-${!var_name}}"
+  local value
+
+  if is_true "$NON_INTERACTIVE"; then
+    if [[ -n "${!var_name}" ]]; then
+      return 0
+    fi
+    printf -v "$var_name" '%s' "$default"
+    return 0
+  fi
+
+  local p_msg="$prompt"
+  [[ -n "$default" ]] && p_msg="$prompt [$default]"
+
+  if [[ -t 0 ]]; then
+    read -r -p "$p_msg: " value
+  elif [[ -r /dev/tty ]]; then
+    read -r -p "$p_msg: " value </dev/tty
+  else
+    log_e "Интерактивный ввод недоступен. Используйте NON_INTERACTIVE=true."
+    exit 1
+  fi
+
+  value="${value:-$default}"
+  printf -v "$var_name" '%s' "$value"
+}
+
 validate_bot_token() {
   local token="$1"
   if [[ ! "$token" =~ ^[0-9]{8,12}:[a-zA-Z0-9_-]{35}$ ]]; then
@@ -227,6 +261,16 @@ validate_url() {
     return 1
   fi
   return 0
+}
+
+validate_chat_id() {
+  local chat_id="$1"
+  [[ -z "$chat_id" ]] && return 0
+  if [[ "$chat_id" =~ ^-100[0-9]{5,}$ || "$chat_id" =~ ^-?[0-9]{5,}$ ]]; then
+    return 0
+  fi
+  log_e "Неверный формат CHAT_ID: ${chat_id}. Пример: -1001234567890"
+  return 1
 }
 
 is_ipv4() {
@@ -455,6 +499,63 @@ env_set_if_missing() {
   grep -q "^${key}=" "$file" || printf '%s=%s\n' "$key" "$val" >> "$file"
 }
 
+env_get() {
+  local file="$1" key="$2" default="${3:-}"
+  [[ -f "$file" ]] || {
+    printf '%s' "$default"
+    return 0
+  }
+  local line value
+  line="$(grep -m1 "^${key}=" "$file" || true)"
+  [[ -n "$line" ]] || {
+    printf '%s' "$default"
+    return 0
+  }
+  value="${line#*=}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
+}
+
+repair_bot_env_settings() {
+  local env_file="$1"
+  local cabinet_origin cabinet_url
+  cabinet_origin="$(normalize_origin "$CABINET_DOMAIN")"
+  cabinet_url="$(cabinet_base_url "$CABINET_DOMAIN")"
+
+  ensure_env "$BOT_DIR"
+  env_set "$env_file" "WEB_API_ENABLED" "true"
+  env_set_if_missing "$env_file" "WEB_API_PORT" "$BOT_API_PORT"
+  env_set "$env_file" "CABINET_ENABLED" "true"
+  env_set "$env_file" "CABINET_URL" "$cabinet_url"
+  env_set "$env_file" "MAIN_MENU_MODE" "cabinet"
+  env_set_if_missing "$env_file" "CABINET_JWT_SECRET" "$(openssl rand -hex 32)"
+
+  if [[ -n "$cabinet_origin" ]]; then
+    env_set "$env_file" "CABINET_ALLOWED_ORIGINS" "$cabinet_origin"
+    env_set "$env_file" "WEB_API_ALLOWED_ORIGINS" "$cabinet_origin"
+  fi
+  if [[ -n "$TELEGRAM_BOT_USERNAME" ]]; then
+    env_set "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "$TELEGRAM_BOT_USERNAME"
+  fi
+
+  if [[ -n "$ADMIN_NOTIFICATIONS_CHAT_ID" ]]; then
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "true"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+    env_set "$env_file" "ADMIN_REPORTS_CHAT_ID" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+    if [[ -n "$ADMIN_NOTIFICATIONS_TOPIC_ID" ]]; then
+      env_set "$env_file" "ADMIN_NOTIFICATIONS_TOPIC_ID" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
+      env_set "$env_file" "ADMIN_REPORTS_TOPIC_ID" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
+    fi
+  else
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "false"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" ""
+    env_set "$env_file" "ADMIN_REPORTS_CHAT_ID" ""
+  fi
+}
+
 check_remnawave() {
   local url="$1" key="$2" code="" ep
   log_i "Проверка доступности Remnawave API..."
@@ -541,6 +642,20 @@ configure_bot_env() {
   fi
   if [[ -n "$TELEGRAM_BOT_USERNAME" ]]; then
     env_set "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "$TELEGRAM_BOT_USERNAME"
+  fi
+  if [[ -n "$ADMIN_NOTIFICATIONS_CHAT_ID" ]]; then
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "true"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+    env_set "$env_file" "ADMIN_REPORTS_CHAT_ID" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+    if [[ -n "$ADMIN_NOTIFICATIONS_TOPIC_ID" ]]; then
+      env_set "$env_file" "ADMIN_NOTIFICATIONS_TOPIC_ID" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
+      env_set "$env_file" "ADMIN_REPORTS_TOPIC_ID" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
+    fi
+  else
+    # Prevent noisy "chat not found" errors on fresh installs
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_ENABLED" "false"
+    env_set "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" ""
+    env_set "$env_file" "ADMIN_REPORTS_CHAT_ID" ""
   fi
 
   # Branding (synced with Cabinet if possible)
@@ -810,6 +925,78 @@ install_cabinet() {
   log_ok "Кабинет Bedolaga развернут."
 }
 
+repair_installation() {
+  local env_file="$BOT_DIR/.env"
+  local cabinet_url_from_env
+
+  log_i "Режим ремонта: проверка текущей установки..."
+  if [[ ! -d "$BOT_DIR" ]]; then
+    log_e "Каталог бота не найден: $BOT_DIR"
+    log_e "Сначала выполните обычную установку (пункт 1)."
+    exit 1
+  fi
+
+  ensure_env "$BOT_DIR"
+  BOT_TOKEN="${BOT_TOKEN:-$(env_get "$env_file" "BOT_TOKEN" "")}"
+  TELEGRAM_BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-$(env_get "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "")}"
+  [[ -n "$TELEGRAM_BOT_USERNAME" ]] || TELEGRAM_BOT_USERNAME="$(env_get "$env_file" "BOT_USERNAME" "")"
+  BOT_API_PORT="${BOT_API_PORT:-$(env_get "$env_file" "WEB_API_PORT" "8080")}"
+  ADMIN_NOTIFICATIONS_CHAT_ID="${ADMIN_NOTIFICATIONS_CHAT_ID:-$(env_get "$env_file" "ADMIN_NOTIFICATIONS_CHAT_ID" "")}"
+  ADMIN_NOTIFICATIONS_TOPIC_ID="${ADMIN_NOTIFICATIONS_TOPIC_ID:-$(env_get "$env_file" "ADMIN_NOTIFICATIONS_TOPIC_ID" "")}"
+  cabinet_url_from_env="$(env_get "$env_file" "CABINET_URL" "")"
+  if [[ -z "$CABINET_DOMAIN" && -n "$cabinet_url_from_env" ]]; then
+    CABINET_DOMAIN="$(normalize_domain_value "$cabinet_url_from_env")"
+  fi
+
+  if [[ -z "$CABINET_DOMAIN" ]]; then
+    ask CABINET_DOMAIN "Домен кабинета (например: cabinet.example.com)" ""
+  fi
+  CABINET_DOMAIN="$(normalize_domain_value "$CABINET_DOMAIN")"
+
+  if [[ -z "$TELEGRAM_BOT_USERNAME" && -n "$BOT_TOKEN" ]]; then
+    TELEGRAM_BOT_USERNAME="$(autodetect_bot_username "$BOT_TOKEN")"
+    [[ -n "$TELEGRAM_BOT_USERNAME" ]] && log_ok "Автоопределен username бота: ${TELEGRAM_BOT_USERNAME}"
+  fi
+  if [[ -z "$TELEGRAM_BOT_USERNAME" ]] && ! is_true "$NON_INTERACTIVE"; then
+    ask TELEGRAM_BOT_USERNAME "Username бота без @" ""
+  fi
+
+  while true; do
+    ask_optional ADMIN_NOTIFICATIONS_CHAT_ID "CHAT_ID для админ-уведомлений (опционально, Enter = выключить)" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+    validate_chat_id "$ADMIN_NOTIFICATIONS_CHAT_ID" && break || ADMIN_NOTIFICATIONS_CHAT_ID=""
+  done
+  if [[ -n "$ADMIN_NOTIFICATIONS_CHAT_ID" ]]; then
+    ask_optional ADMIN_NOTIFICATIONS_TOPIC_ID "TOPIC_ID для админ-уведомлений (опционально)" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
+  fi
+
+  if is_true "$ENABLE_SSL" && ! is_domain_like "$CABINET_DOMAIN"; then
+    log_w "SSL отключен автоматически: для IP/localhost Let's Encrypt не применяется."
+    ENABLE_SSL="false"
+  fi
+  if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && is_domain_like "$CABINET_DOMAIN"; then
+    ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
+  fi
+
+  repair_bot_env_settings "$env_file"
+  compose "$BOT_DIR" up -d --build
+  compose "$BOT_DIR" ps || true
+
+  if [[ ! -f "$STATIC_ROOT/index.html" ]]; then
+    log_w "Статика кабинета не найдена в $STATIC_ROOT. Восстанавливаю..."
+    clone_or_update "$CABINET_REPO" "$CABINET_DIR" "Bedolaga Cabinet"
+    build_cabinet_static
+  fi
+
+  if is_true "$CONFIGURE_NGINX"; then
+    write_nginx_conf
+    setup_ssl
+  fi
+
+  log_ok "Режим ремонта завершен."
+  print_summary
+  exit 0
+}
+
 confirm_destructive() {
   local msg="$1"
   local answer=""
@@ -865,6 +1052,9 @@ handle_remove_action() {
       remove_cabinet
       exit 0
       ;;
+    repair_install)
+      repair_installation
+      ;;
   esac
 }
 
@@ -884,7 +1074,7 @@ collect_inputs() {
   fi
 
   if ! is_true "$INSTALL_BOT" && ! is_true "$INSTALL_CABINET" && is_true "$CONFIGURE_NGINX"; then
-    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$MINIMAL_MODE"; then
+    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && is_domain_like "$CABINET_DOMAIN"; then
       ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
     fi
     validate_dns_for_domain "$detected_ip"
@@ -914,6 +1104,14 @@ collect_inputs() {
     fi
     if [[ -z "$TELEGRAM_BOT_USERNAME" ]] && ! is_true "$MINIMAL_MODE"; then
       ask TELEGRAM_BOT_USERNAME "Username бота без @" ""
+    fi
+
+    while true; do
+      ask_optional ADMIN_NOTIFICATIONS_CHAT_ID "CHAT_ID для админ-уведомлений (опционально, Enter = выключить)" "$ADMIN_NOTIFICATIONS_CHAT_ID"
+      validate_chat_id "$ADMIN_NOTIFICATIONS_CHAT_ID" && break || ADMIN_NOTIFICATIONS_CHAT_ID=""
+    done
+    if [[ -n "$ADMIN_NOTIFICATIONS_CHAT_ID" ]]; then
+      ask_optional ADMIN_NOTIFICATIONS_TOPIC_ID "TOPIC_ID для админ-уведомлений (опционально)" "$ADMIN_NOTIFICATIONS_TOPIC_ID"
     fi
 
     while true; do
@@ -983,7 +1181,7 @@ collect_inputs() {
       fi
     fi
 
-    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE" && ! is_true "$MINIMAL_MODE"; then
+    if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE" && is_domain_like "$CABINET_DOMAIN"; then
       echo -e ""
       ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
     fi
@@ -1026,6 +1224,10 @@ print_summary() {
   echo "URL Кабинета:   http://${CABINET_DOMAIN}"
   if is_true "$ENABLE_SSL" && [[ -n "$LETSENCRYPT_EMAIL" ]] && [[ "$CABINET_DOMAIN" != "localhost" && "$CABINET_DOMAIN" != "127.0.0.1" ]]; then
     echo "URL Кабинета:   https://${CABINET_DOMAIN}"
+  fi
+  if ! is_domain_like "$CABINET_DOMAIN"; then
+    log_w "Cabinet запущен на IP/localhost: Telegram Login Widget может не работать (Bot domain invalid)."
+    log_w "Для входа через Telegram нужен домен + HTTPS и домен, добавленный в BotFather -> Bot Settings -> Domain/Web Login."
   fi
   echo
   echo "Полезные команды:"
