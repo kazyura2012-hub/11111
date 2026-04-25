@@ -41,6 +41,15 @@ REMNAWAVE_API_URL="${REMNAWAVE_API_URL:-}"
 REMNAWAVE_API_KEY="${REMNAWAVE_API_KEY:-}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 
+# SMTP Configuration
+SMTP_HOST="${SMTP_HOST:-}"
+SMTP_PORT="${SMTP_PORT:-587}"
+SMTP_USER="${SMTP_USER:-}"
+SMTP_PASSWORD="${SMTP_PASSWORD:-}"
+SMTP_FROM_NAME="${SMTP_FROM_NAME:-Bedolaga Cabinet}"
+SMTP_FROM_EMAIL="${SMTP_FROM_EMAIL:-}"
+SMTP_TLS="${SMTP_TLS:-true}"
+
 PRICE_30_DAYS="${PRICE_30_DAYS:-1000}"
 PRICE_90_DAYS="${PRICE_90_DAYS:-36900}"
 PRICE_180_DAYS="${PRICE_180_DAYS:-69900}"
@@ -135,64 +144,56 @@ show_menu() {
 ask() {
   local var_name="$1"
   local prompt="$2"
-  local default="${3:-}"
-  local current="${!var_name:-}"
+  local default="${3:-${!var_name}}"
   local value
 
-  if [[ -n "$current" ]]; then
-    return 0
-  fi
   if is_true "$NON_INTERACTIVE"; then
+    if [[ -n "${!var_name}" ]]; then
+      return 0
+    fi
     if [[ -n "$default" ]]; then
       printf -v "$var_name" '%s' "$default"
       return 0
     fi
-    log_e "Required variable is missing in NON_INTERACTIVE mode: $var_name"
+    log_e "Отсутствует обязательная переменная в неинтерактивном режиме: $var_name"
     exit 1
   fi
 
-  if [[ -n "$default" ]]; then
-    if [[ -t 0 ]]; then
-      read -r -p "$prompt [$default]: " value
-    elif [[ -r /dev/tty ]]; then
-      read -r -p "$prompt [$default]: " value </dev/tty
-    else
-      log_e "No interactive TTY available. Set NON_INTERACTIVE=true and pass env vars."
-      exit 1
-    fi
-    value="${value:-$default}"
+  local p_msg="$prompt"
+  [[ -n "$default" ]] && p_msg="$prompt [$default]"
+
+  if [[ -t 0 ]]; then
+    read -r -p "$p_msg: " value
+  elif [[ -r /dev/tty ]]; then
+    read -r -p "$p_msg: " value </dev/tty
   else
-    if [[ -t 0 ]]; then
-      read -r -p "$prompt: " value
-    elif [[ -r /dev/tty ]]; then
-      read -r -p "$prompt: " value </dev/tty
-    else
-      log_e "No interactive TTY available. Set NON_INTERACTIVE=true and pass env vars."
-      exit 1
-    fi
+    log_e "Интерактивный ввод недоступен. Используйте NON_INTERACTIVE=true."
+    exit 1
   fi
+
+  value="${value:-$default}"
   printf -v "$var_name" '%s' "$value"
 }
 
 ask_secret() {
   local var_name="$1"
   local prompt="$2"
-  local current="${!var_name:-}"
   local value
 
-  if [[ -n "$current" ]]; then
+  if [[ -n "${!var_name}" ]]; then
     return 0
   fi
   if is_true "$NON_INTERACTIVE"; then
-    log_e "Required secret variable is missing in NON_INTERACTIVE mode: $var_name"
+    log_e "Отсутствует секретная переменная в неинтерактивном режиме: $var_name"
     exit 1
   fi
+
   if [[ -t 0 ]]; then
     read -r -s -p "$prompt: " value
   elif [[ -r /dev/tty ]]; then
     read -r -s -p "$prompt: " value </dev/tty
   else
-    log_e "No interactive TTY available. Set NON_INTERACTIVE=true and pass env vars."
+    log_e "Интерактивный ввод недоступен."
     exit 1
   fi
   echo
@@ -246,9 +247,10 @@ normalize_origin() {
   if [[ -z "$v" ]]; then
     echo ""
   elif [[ "$v" =~ ^https?:// ]]; then
-    echo "$v"
+    echo "${v%/}"
   else
-    echo "https://$v"
+    # For domains/IPs, we allow both http and https for CORS safety
+    echo "https://${v%/},http://${v%/}"
   fi
 }
 
@@ -449,10 +451,23 @@ configure_bot_env() {
   env_set "$env_file" "REMNAWAVE_API_KEY" "$REMNAWAVE_API_KEY"
   env_set "$env_file" "REMNAWAVE_AUTH_TYPE" "api_key"
   env_set "$env_file" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
+  env_set_if_missing "$env_file" "POSTGRES_HOST" "db"
+  env_set_if_missing "$env_file" "POSTGRES_PORT" "5432"
+  env_set_if_missing "$env_file" "POSTGRES_USER" "postgres"
+  env_set_if_missing "$env_file" "POSTGRES_DB" "remnawave_bot"
   env_set "$env_file" "SALES_MODE" "tariffs"
   env_set "$env_file" "PRICE_30_DAYS" "$PRICE_30_DAYS"
   env_set "$env_file" "PRICE_90_DAYS" "$PRICE_90_DAYS"
   env_set "$env_file" "PRICE_180_DAYS" "$PRICE_180_DAYS"
+
+  # SMTP settings
+  env_set "$env_file" "SMTP_HOST" "$SMTP_HOST"
+  env_set "$env_file" "SMTP_PORT" "$SMTP_PORT"
+  env_set "$env_file" "SMTP_USER" "$SMTP_USER"
+  env_set "$env_file" "SMTP_PASSWORD" "$SMTP_PASSWORD"
+  env_set "$env_file" "SMTP_FROM_NAME" "$SMTP_FROM_NAME"
+  env_set "$env_file" "SMTP_FROM_EMAIL" "$SMTP_FROM_EMAIL"
+  env_set "$env_file" "SMTP_TLS" "$SMTP_TLS"
 
   # Payment settings
   env_set "$env_file" "CRYPTOBOT_ENABLED" "$([[ -n "$CRYPTOBOT_API_TOKEN" ]] && echo "true" || echo "false")"
@@ -484,10 +499,29 @@ configure_bot_env() {
   env_set "$env_file" "ENABLE_LOGO_MODE" "true"
   env_set "$env_file" "LOG_LEVEL" "INFO"
   env_set "$env_file" "DEBUG" "false"
-  
-  # Topic IDs (default 0 for disabling)
-  env_set_if_missing "$env_file" "ADMIN_REPORTS_TOPIC_ID" "0"
-  env_set_if_missing "$env_file" "LOG_ROTATION_TOPIC_ID" "0"
+
+  # Fix common Pydantic validation errors for integer fields (ensure they are 0 if invalid/placeholder)
+  # This list covers fields that must be integers in the bot's Pydantic models
+  local int_fields=(
+    "ADMIN_REPORTS_TOPIC_ID" 
+    "LOG_ROTATION_TOPIC_ID" 
+    "MULENPAY_SHOP_ID" 
+    "FREEKASSA_SHOP_ID" 
+    "FREEKASSA_PAYMENT_SYSTEM_ID" 
+    "KASSA_AI_SHOP_ID" 
+    "SEVERPAY_MID"
+    "LOG_ROTATION_DAYS"
+    "BACKUP_ROTATION_DAYS"
+  )
+  for key in "${int_fields[@]}"; do
+    local current_val
+    # Get current value, removing quotes if any
+    current_val=$(grep "^${key}=" "$env_file" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
+    # If empty or not a pure number, set to 0
+    if [[ -z "$current_val" || ! "$current_val" =~ ^[0-9]+$ ]]; then
+      env_set "$env_file" "$key" "0"
+    fi
+  done
 }
 
 install_bot() {
@@ -833,6 +867,20 @@ collect_inputs() {
     ask_secret REMNAWAVE_API_KEY "REMNAWAVE_API_KEY"
     ask_secret POSTGRES_PASSWORD "POSTGRES_PASSWORD (пароль для базы данных бота)"
 
+    echo -e "\n${BLUE}--- Настройка Почты (SMTP) ---${NC}"
+    echo -e "${YELLOW}Необходимо для регистрации пользователей в кабинете.${NC}"
+    ask SMTP_HOST "SMTP Хост (например: smtp.yandex.ru или smtp.gmail.com)" "$SMTP_HOST"
+    if [[ -n "$SMTP_HOST" ]]; then
+      ask SMTP_PORT "SMTP Порт (обычно 465 или 587)" "$SMTP_PORT"
+      ask SMTP_USER "SMTP Пользователь (обычно ваш email)" "$SMTP_USER"
+      ask_secret SMTP_PASSWORD "SMTP Пароль (для Yandex/Gmail нужен 'Пароль приложения')"
+      ask SMTP_FROM_EMAIL "Email отправителя (тот же что и пользователь)" "${SMTP_USER}"
+      ask SMTP_FROM_NAME "Имя отправителя" "$SMTP_FROM_NAME"
+      ask SMTP_TLS "Использовать TLS/SSL? (true/false)" "$SMTP_TLS"
+    else
+      log_w "SMTP не настроен. Регистрация в кабинете может не работать!"
+    fi
+
     echo -e "\n${BLUE}--- Поддержка и Цены ---${NC}"
     ask SUPPORT_USERNAME "Username поддержки в Telegram (например: @support_bot)" "$SUPPORT_USERNAME"
     ask PRICE_30_DAYS "Цена за 30 дней (в копейках, например: 10000 = 100 руб)" "$PRICE_30_DAYS"
@@ -863,14 +911,15 @@ collect_inputs() {
       fi
 
       if ! is_true "$NON_INTERACTIVE"; then
-        echo "Выберите способ развертывания кабинета:"
-        echo "  image) Использовать готовый Docker образ (рекомендуется, экономит ОЗУ)"
-        echo "  source) Собрать из исходников (нужно 2ГБ+ ОЗУ, медленно)"
+        echo -e "\nВыберите способ развертывания кабинета:"
+        echo "  image)  Использовать готовый Docker образ (рекомендуется, быстро)"
+        echo "  source) Собрать из исходников (нужно 2ГБ+ ОЗУ, очень медленно)"
         ask CABINET_DEPLOY_MODE "Режим" "$CABINET_DEPLOY_MODE"
       fi
     fi
 
     if is_true "$ENABLE_SSL" && [[ -z "$LETSENCRYPT_EMAIL" ]] && ! is_true "$NON_INTERACTIVE"; then
+      echo -e ""
       ask LETSENCRYPT_EMAIL "Email для Let's Encrypt SSL (для уведомлений)" ""
     fi
   fi
