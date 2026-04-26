@@ -66,6 +66,8 @@ VITE_APP_NAME="${VITE_APP_NAME:-Cabinet}"
 VITE_APP_LOGO="${VITE_APP_LOGO:-V}"
 BOT_API_PORT="${BOT_API_PORT:-8080}"
 CABINET_DEPLOY_MODE="${CABINET_DEPLOY_MODE:-auto}" # image|source|auto
+BOT_MENU_MODE="${BOT_MENU_MODE:-}"
+MINIAPP_CUSTOM_URL="${MINIAPP_CUSTOM_URL:-}"
 
 SUDO=""
 
@@ -600,9 +602,69 @@ load_runtime_from_bot_env() {
   ensure_env "$BOT_DIR"
   BOT_TOKEN="${BOT_TOKEN:-$(env_get "$env_file" "BOT_TOKEN" "")}"
   BOT_API_PORT="${BOT_API_PORT:-$(env_get "$env_file" "WEB_API_PORT" "8080")}"
+  BOT_MENU_MODE="${BOT_MENU_MODE:-$(env_get "$env_file" "MAIN_MENU_MODE" "cabinet")}"
+  MINIAPP_CUSTOM_URL="${MINIAPP_CUSTOM_URL:-$(env_get "$env_file" "MINIAPP_CUSTOM_URL" "")}"
   TELEGRAM_BOT_USERNAME="${TELEGRAM_BOT_USERNAME:-$(env_get "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "")}"
   if [[ -z "$CABINET_DOMAIN" ]]; then
     CABINET_DOMAIN="$(normalize_domain_value "$(env_get "$env_file" "CABINET_URL" "")")"
+  fi
+}
+
+normalize_menu_mode() {
+  local mode="${1,,}"
+  case "$mode" in
+    miniapp|cabinet)
+      printf '%s' "cabinet"
+      ;;
+    telegram|default)
+      printf '%s' "default"
+      ;;
+    *)
+      printf '%s' "cabinet"
+      ;;
+  esac
+}
+
+ask_bot_menu_mode() {
+  local current_mode normalized choice default_miniapp
+  current_mode="$(normalize_menu_mode "${BOT_MENU_MODE:-cabinet}")"
+  default_miniapp="${MINIAPP_CUSTOM_URL:-$(cabinet_base_url "$CABINET_DOMAIN")}"
+
+  if is_true "$NON_INTERACTIVE"; then
+    BOT_MENU_MODE="$current_mode"
+  else
+    echo -e "\n${BLUE}--- Режим кнопок меню бота ---${NC}"
+    echo "  1) Telegram-режим (кнопки работают внутри бота)"
+    echo "  2) MiniApp-режим (кнопки ЛК/Подписка/Баланс открывают веб-кабинет)"
+    if [[ -t 0 ]]; then
+      read -r -p "Выберите режим [1-2] (по умолчанию 2): " choice
+    else
+      read -r -p "Выберите режим [1-2] (по умолчанию 2): " choice </dev/tty
+    fi
+    case "$choice" in
+      1) BOT_MENU_MODE="default" ;;
+      2|"") BOT_MENU_MODE="cabinet" ;;
+      *) BOT_MENU_MODE="$current_mode" ;;
+    esac
+  fi
+
+  normalized="$(normalize_menu_mode "$BOT_MENU_MODE")"
+  BOT_MENU_MODE="$normalized"
+  if [[ "$normalized" == "cabinet" ]]; then
+    ask_optional MINIAPP_CUSTOM_URL "MINIAPP_CUSTOM_URL (обычно URL кабинета)" "$default_miniapp"
+  fi
+}
+
+apply_menu_mode_env_settings() {
+  local env_file="$1"
+  local cabinet_url="$2"
+  local normalized miniapp_url
+  normalized="$(normalize_menu_mode "${BOT_MENU_MODE:-$(env_get "$env_file" "MAIN_MENU_MODE" "cabinet")}")"
+  env_set "$env_file" "MAIN_MENU_MODE" "$normalized"
+  if [[ "$normalized" == "cabinet" ]]; then
+    miniapp_url="${MINIAPP_CUSTOM_URL:-$(env_get "$env_file" "MINIAPP_CUSTOM_URL" "$cabinet_url")}"
+    [[ -n "$miniapp_url" ]] || miniapp_url="$cabinet_url"
+    env_set "$env_file" "MINIAPP_CUSTOM_URL" "$miniapp_url"
   fi
 }
 
@@ -617,7 +679,7 @@ repair_bot_env_settings() {
   env_set "$env_file" "WEB_API_PORT" "$BOT_API_PORT"
   env_set "$env_file" "CABINET_ENABLED" "true"
   env_set "$env_file" "CABINET_URL" "$cabinet_url"
-  env_set "$env_file" "MAIN_MENU_MODE" "cabinet"
+  apply_menu_mode_env_settings "$env_file" "$cabinet_url"
   env_set_if_missing "$env_file" "CABINET_JWT_SECRET" "$(openssl rand -hex 32)"
 
   if [[ -n "$cabinet_origin" ]]; then
@@ -719,6 +781,7 @@ configure_bot_env() {
   env_set "$env_file" "WEB_API_PORT" "$BOT_API_PORT"
   env_set "$env_file" "CABINET_ENABLED" "true"
   env_set "$env_file" "CABINET_URL" "$cabinet_url"
+  apply_menu_mode_env_settings "$env_file" "$cabinet_url"
   env_set "$env_file" "CABINET_EMAIL_AUTH_ENABLED" "$smtp_ready"
   env_set "$env_file" "CABINET_EMAIL_VERIFICATION_ENABLED" "$smtp_ready"
   env_set_if_missing "$env_file" "CABINET_JWT_SECRET" "$(openssl rand -hex 32)"
@@ -1263,6 +1326,24 @@ configure_cabinet_core_settings() {
   log_ok "Базовые параметры кабинета и Telegram-входа обновлены."
 }
 
+configure_menu_mode_settings() {
+  local env_file="$1"
+  local cabinet_url_from_env
+  cabinet_url_from_env="$(env_get "$env_file" "CABINET_URL" "")"
+  BOT_MENU_MODE="$(normalize_menu_mode "$(env_get "$env_file" "MAIN_MENU_MODE" "${BOT_MENU_MODE:-cabinet}")")"
+  MINIAPP_CUSTOM_URL="$(env_get "$env_file" "MINIAPP_CUSTOM_URL" "${MINIAPP_CUSTOM_URL:-}")"
+
+  if [[ -z "$CABINET_DOMAIN" && -n "$cabinet_url_from_env" ]]; then
+    CABINET_DOMAIN="$(normalize_domain_value "$cabinet_url_from_env")"
+  fi
+  [[ -n "$CABINET_DOMAIN" ]] || ask CABINET_DOMAIN "Домен кабинета для MiniApp (если нужен)" ""
+  CABINET_DOMAIN="$(normalize_domain_value "$CABINET_DOMAIN")"
+
+  ask_bot_menu_mode
+  apply_menu_mode_env_settings "$env_file" "$(cabinet_base_url "$CABINET_DOMAIN")"
+  log_ok "Режим кнопок меню обновлен. Примените и перезапустите бота (пункт меню 8)."
+}
+
 run_configuration_diagnostics() {
   local env_file="$1"
   local auto_fix="${2:-false}"
@@ -1270,7 +1351,7 @@ run_configuration_diagnostics() {
   local warnings=0
   local fixed=0
   local cabinet_url cabinet_origin cabinet_enabled
-  local telegram_user main_menu_mode
+  local telegram_user main_menu_mode miniapp_custom_url
   local email_enabled smtp_host smtp_from
   local oidc_enabled oidc_id oidc_secret
   local oauth_google oauth_yandex oauth_discord oauth_vk
@@ -1282,6 +1363,7 @@ run_configuration_diagnostics() {
   cabinet_enabled="$(env_get "$env_file" "CABINET_ENABLED" "false")"
   telegram_user="$(env_get "$env_file" "CABINET_TELEGRAM_BOT_USERNAME" "")"
   main_menu_mode="$(env_get "$env_file" "MAIN_MENU_MODE" "default")"
+  miniapp_custom_url="$(env_get "$env_file" "MINIAPP_CUSTOM_URL" "")"
 
   if ! is_true "$cabinet_enabled"; then
     log_w "CABINET_ENABLED=false. Кабинет API может быть недоступен."
@@ -1347,6 +1429,22 @@ run_configuration_diagnostics() {
     fi
   else
     log_ok "MAIN_MENU_MODE=cabinet"
+  fi
+
+  if [[ "$main_menu_mode" == "cabinet" ]]; then
+    if [[ -z "$miniapp_custom_url" ]]; then
+      log_e "MINIAPP_CUSTOM_URL не задан. Кнопки меню кабинета (ЛК/Подписка/Баланс) не будут открываться."
+      ((issues++))
+      if is_true "$auto_fix" && [[ -n "$cabinet_url" ]]; then
+        env_set "$env_file" "MINIAPP_CUSTOM_URL" "$cabinet_url"
+        miniapp_custom_url="$cabinet_url"
+        log_ok "AUTO-FIX: MINIAPP_CUSTOM_URL=${miniapp_custom_url}"
+        ((fixed++))
+        ((issues--))
+      fi
+    else
+      log_ok "MINIAPP_CUSTOM_URL=${miniapp_custom_url}"
+    fi
   fi
 
   cabinet_origin=""
@@ -1529,14 +1627,15 @@ run_settings_menu() {
     echo "  3) Telegram OIDC (oauth.telegram.org)"
     echo "  4) OAuth провайдеры (Google/Yandex/Discord/VK)"
     echo "  5) Админ-уведомления (CHAT_ID/TOPIC_ID)"
-    echo "  6) Перенастроить Nginx/SSL для текущего домена"
-    echo "  7) Применить настройки и перезапустить бот"
-    echo "  8) Проверка настроек (диагностика)"
-    echo "  9) Назад в главное меню"
+    echo "  6) Режим кнопок меню (Telegram/MiniApp)"
+    echo "  7) Перенастроить Nginx/SSL для текущего домена"
+    echo "  8) Применить настройки и перезапустить бот"
+    echo "  9) Проверка настроек (диагностика)"
+    echo " 10) Назад в главное меню"
     if [[ -t 0 ]]; then
-      read -r -p "Введите выбор [1-9]: " choice
+      read -r -p "Введите выбор [1-10]: " choice
     else
-      read -r -p "Введите выбор [1-9]: " choice </dev/tty
+      read -r -p "Введите выбор [1-10]: " choice </dev/tty
     fi
 
     case "$choice" in
@@ -1546,6 +1645,9 @@ run_settings_menu() {
       4) configure_oauth_settings "$env_file" ;;
       5) configure_admin_notifications_settings "$env_file" ;;
       6)
+        configure_menu_mode_settings "$env_file"
+        ;;
+      7)
         if [[ -z "$CABINET_DOMAIN" ]]; then
           CABINET_DOMAIN="$(normalize_domain_value "$(env_get "$env_file" "CABINET_URL" "")")"
         fi
@@ -1557,15 +1659,15 @@ run_settings_menu() {
         write_nginx_conf
         setup_ssl
         ;;
-      7)
+      8)
         compose "$BOT_DIR" up -d --build
         compose "$BOT_DIR" ps || true
         log_ok "Настройки применены. Бот перезапущен."
         ;;
-      8)
+      9)
         run_configuration_diagnostics "$env_file"
         ;;
-      9)
+      10)
         break
         ;;
       *)
@@ -1890,6 +1992,8 @@ collect_inputs() {
     else
       log_i "MINIMAL_MODE=true: SMTP, цены и платёжки оставлены со значениями по умолчанию."
     fi
+
+    ask_bot_menu_mode
   fi
 
   # 3. Cabinet Configuration
